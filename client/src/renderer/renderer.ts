@@ -1,4 +1,4 @@
-type StreamId = "mic" | "system";
+import { AudioStreamSender, type StreamId } from "./audio/AudioStreamSender";
 
 type TranscriptSegment = {
   id: string;
@@ -23,19 +23,7 @@ type ErrorMessage = {
   message: string;
 };
 
-type AudioChunkMessage = {
-  type: "audio_chunk";
-  session_id: string;
-  stream_id: StreamId;
-  seq: number;
-  timestamp_ms: number;
-  audio_format: {
-    encoding: "pcm_s16le";
-    sample_rate_hz: number;
-    num_channels: 1;
-  };
-  audio_base64: string;
-};
+// AudioChunkMessage type lives in AudioStreamSender module.
 
 const $ = <T extends HTMLElement>(id: string) =>
   document.getElementById(id) as T;
@@ -89,16 +77,6 @@ function formatTime(epochSec: number): string {
   } as Intl.DateTimeFormatOptions);
 }
 
-function arrayBufferToBase64(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf);
-  let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
-}
-
 function floatToPcmS16leMono(input: Float32Array): Int16Array {
   const out = new Int16Array(input.length);
   for (let i = 0; i < input.length; i++) {
@@ -124,10 +102,8 @@ let endedAt: number | null = null;
 const segmentsById = new Map<string, TranscriptSegment>();
 let recvCount = 0;
 
-let micSeq = 0;
-let sysSeq = 0;
-let micSent = 0;
-let sysSent = 0;
+let micSender: AudioStreamSender | null = null;
+let sysSender: AudioStreamSender | null = null;
 
 let captures: CaptureHandle[] = [];
 
@@ -185,7 +161,11 @@ async function refreshDevices(): Promise<void> {
   if (prevSys) sysSelect.value = prevSys;
 }
 
-async function startCaptureForDevice(streamId: StreamId, deviceId: string, chunkMs = 200): Promise<CaptureHandle> {
+async function startCaptureForDevice(
+  streamId: StreamId,
+  deviceId: string,
+  sender: AudioStreamSender
+): Promise<CaptureHandle> {
   const mediaStream = await navigator.mediaDevices.getUserMedia({
     audio: deviceId ? { deviceId: { exact: deviceId } } : true
   });
@@ -196,69 +176,12 @@ async function startCaptureForDevice(streamId: StreamId, deviceId: string, chunk
   // ScriptProcessorNode is deprecated but simplest for MVP.
   const processor = audioContext.createScriptProcessor(4096, 1, 1);
 
-  const sampleRate = audioContext.sampleRate;
-  const bytesPerSample = 2; // s16le
-  const bytesPerMs = (sampleRate * bytesPerSample) / 1000;
-  const targetBytes = Math.max(1, Math.floor(bytesPerMs * chunkMs));
-
-  let pending = new Uint8Array(0);
-
-  function pushBytes(newBytes: Uint8Array) {
-    if (pending.length === 0) {
-      pending = newBytes;
-      return;
-    }
-    const merged = new Uint8Array(pending.length + newBytes.length);
-    merged.set(pending, 0);
-    merged.set(newBytes, pending.length);
-    pending = merged;
-  }
-
-  function maybeSendChunk() {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    if (pending.length < targetBytes) return;
-
-    const sendBytes = pending.slice(0, targetBytes);
-    pending = pending.slice(targetBytes);
-
-    const msg: AudioChunkMessage = {
-      type: "audio_chunk",
-      session_id: sessionIdInput.value,
-      stream_id: streamId,
-      seq: streamId === "mic" ? micSeq : sysSeq,
-      timestamp_ms: Date.now(),
-      audio_format: {
-        encoding: "pcm_s16le",
-        sample_rate_hz: sampleRate,
-        num_channels: 1
-      },
-      audio_base64: arrayBufferToBase64(sendBytes.buffer)
-    };
-
-    // Minimal backpressure handling: drop if buffered too much.
-    if (ws.bufferedAmount > 5_000_000) return;
-
-    ws.send(JSON.stringify(msg));
-    if (streamId === "mic") {
-      micSeq += 1;
-      micSent += 1;
-    } else {
-      sysSeq += 1;
-      sysSent += 1;
-    }
-    sentStatsEl.textContent = `mic=${micSent} sys=${sysSent}`;
-  }
-
   processor.onaudioprocess = (ev) => {
     // We take channel 0 (mono). If input is stereo, this is a simple downmix.
     const input = ev.inputBuffer.getChannelData(0);
     const pcm = floatToPcmS16leMono(input);
-    pushBytes(new Uint8Array(pcm.buffer));
-    // In case there’s enough for multiple chunks, loop.
-    for (let i = 0; i < 10; i++) {
-      if (pending.length < targetBytes) break;
-      maybeSendChunk();
-    }
+    sender.pushPcmBytes(new Uint8Array(pcm.buffer));
+    sentStatsEl.textContent = `mic=${micSender?.getSentCount() ?? 0} sys=${sysSender?.getSentCount() ?? 0}`;
   };
 
   source.connect(processor);
@@ -289,10 +212,8 @@ async function start(): Promise<void> {
 
   segmentsById.clear();
   recvCount = 0;
-  micSeq = 0;
-  sysSeq = 0;
-  micSent = 0;
-  sysSent = 0;
+  micSender = null;
+  sysSender = null;
   sentStatsEl.textContent = "mic=0 sys=0";
   recvStatsEl.textContent = "0";
   transcriptEl.textContent = "";
@@ -313,8 +234,60 @@ async function start(): Promise<void> {
     const sysId = sysSelect.value;
 
     const handles: CaptureHandle[] = [];
-    if (micId) handles.push(await startCaptureForDevice("mic", micId));
-    if (sysId) handles.push(await startCaptureForDevice("system", sysId));
+    if (!ws) return;
+
+    // Create senders (chunkDurationMs default is 250ms).
+    // The sender wants a stable sample rate; we create the AudioContext first and pass its sample rate.
+    // We create per-stream sender inside the capture start function after AudioContext is created.
+    if (micId) {
+      // temporary sender; will be recreated once we know the actual AudioContext sampleRate
+      const tmp = new AudioStreamSender({
+        ws,
+        sessionId,
+        streamId: "mic",
+        sampleRateHz: 48000
+      });
+      micSender = tmp;
+      const handle = await startCaptureForDevice("mic", micId, tmp);
+      // Replace sender with accurate sampleRate from the created context.
+      micSender = new AudioStreamSender({
+        ws,
+        sessionId,
+        streamId: "mic",
+        sampleRateHz: handle.audioContext.sampleRate
+      });
+      // Point processor to the new sender.
+      handle.processor.onaudioprocess = (ev) => {
+        const input = ev.inputBuffer.getChannelData(0);
+        const pcm = floatToPcmS16leMono(input);
+        micSender?.pushPcmBytes(new Uint8Array(pcm.buffer));
+        sentStatsEl.textContent = `mic=${micSender?.getSentCount() ?? 0} sys=${sysSender?.getSentCount() ?? 0}`;
+      };
+      handles.push(handle);
+    }
+    if (sysId) {
+      const tmp = new AudioStreamSender({
+        ws,
+        sessionId,
+        streamId: "system",
+        sampleRateHz: 48000
+      });
+      sysSender = tmp;
+      const handle = await startCaptureForDevice("system", sysId, tmp);
+      sysSender = new AudioStreamSender({
+        ws,
+        sessionId,
+        streamId: "system",
+        sampleRateHz: handle.audioContext.sampleRate
+      });
+      handle.processor.onaudioprocess = (ev) => {
+        const input = ev.inputBuffer.getChannelData(0);
+        const pcm = floatToPcmS16leMono(input);
+        sysSender?.pushPcmBytes(new Uint8Array(pcm.buffer));
+        sentStatsEl.textContent = `mic=${micSender?.getSentCount() ?? 0} sys=${sysSender?.getSentCount() ?? 0}`;
+      };
+      handles.push(handle);
+    }
 
     captures = handles;
   };
@@ -370,6 +343,8 @@ async function stop(): Promise<void> {
     } catch {}
   }
   ws = null;
+  micSender = null;
+  sysSender = null;
 
   startBtn.disabled = false;
   stopBtn.disabled = true;

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 from .protocol_types import StreamId
 
@@ -25,7 +26,7 @@ class StreamBuffer:
 
     # Client-provided epoch (ms since Unix epoch) for the first chunk.
     # Used to anchor transcript timestamps to the client's wall clock.
-    first_timestamp_ms: int | None = None
+    first_timestamp_ms: Optional[int] = None
 
     def buffer_end_offset_bytes(self) -> int:
         return self.buffer_start_offset_bytes + len(self.audio_buffer)

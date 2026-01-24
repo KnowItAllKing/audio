@@ -11,6 +11,11 @@ dependencies = [
   "typing-extensions",
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest",
+]
+
 [tool.uv]
 # Keep uv files local to server/ for the monorepo.
 

@@ -20,6 +20,7 @@ from .protocol_types import (
     TranscriptUpdateMessage,
 )
 from .session_state import SessionState, StreamBuffer
+from .transcription import bytes_per_second, compute_window, eligible_for_transcription
 from .whisper_backend import WhisperBackend, create_backend
 
 
@@ -171,20 +172,19 @@ async def _transcribe_stream(
     socket_map: dict[str, set[WebSocketServerProtocol]],
 ) -> None:
     """Transcribe a single stream buffer and send updates."""
-    bps = sess.bytes_per_second()
+    bps = bytes_per_second(sess.sample_rate_hz, sess.num_channels)
     if bps <= 0:
         return
 
     buf.trim_to_max_bytes(int(max_buffer_sec * bps))
 
     end_off = buf.buffer_end_offset_bytes()
-    new_bytes = end_off - buf.last_transcribed_offset_bytes
-    if new_bytes < int(min_new_audio_sec * bps):
+    min_new_bytes = int(min_new_audio_sec * bps)
+    if not eligible_for_transcription(end_off, buf.last_transcribed_offset_bytes, min_new_bytes):
         return
 
     window_bytes = int(window_sec * bps)
-    window_end = end_off
-    window_start = max(buf.last_transcribed_offset_bytes, window_end - window_bytes)
+    window_start, window_end = compute_window(buf.last_transcribed_offset_bytes, end_off, window_bytes)
 
     rel_start = window_start - buf.buffer_start_offset_bytes
     rel_end = window_end - buf.buffer_start_offset_bytes
