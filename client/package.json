@@ -3,15 +3,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx src/testClient.ts",
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
     "dev:test-client": "tsx src/testClient.ts"
   },
-  "dependencies": {
-    "ws": "^8.18.0"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/node": "^22.13.5",
     "@types/ws": "^8.18.1",
+    "electron": "^34.0.0",
+    "electron-vite": "^2.3.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }

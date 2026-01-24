@@ -68,6 +68,23 @@ cd client
 pnpm dev:test-client
 ```
 
+## Phase 4: Electron GUI client
+
+The Electron app captures **mic** and a user-selected **“system”** device (typically a virtual loopback input), streams both to the server, renders transcript updates, and saves transcript JSON on stop.
+
+```bash
+cd client
+pnpm install
+pnpm dev
+```
+
+Legacy headless client (kept for quick protocol testing):
+
+```bash
+cd client
+pnpm dev:test-client
+```
+
 ### Optional: run via Turbo
 
 Once you add Turborepo as a dev dependency (e.g. `pnpm add -D turbo -w`), you can run:
