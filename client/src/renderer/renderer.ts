@@ -78,10 +78,15 @@ function setLastUpdate(ts: number | null) {
   lastUpdateEl.textContent = ts ? new Date(ts).toLocaleTimeString() : "—";
 }
 
-function formatTime(sec: number): string {
-  const m = Math.floor(sec / 60);
-  const s = sec - m * 60;
-  return `${String(m).padStart(2, "0")}:${s.toFixed(2).padStart(5, "0")}`;
+function formatTime(epochSec: number): string {
+  // Timestamps are Unix epoch seconds from the client's clock.
+  const date = new Date(epochSec * 1000);
+  return date.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    fractionalSecondDigits: 2
+  } as Intl.DateTimeFormatOptions);
 }
 
 function arrayBufferToBase64(buf: ArrayBuffer): string {
