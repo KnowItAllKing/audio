@@ -23,6 +23,10 @@ class StreamBuffer:
     # Absolute byte offset up to which we've "committed" transcription.
     last_transcribed_offset_bytes: int = 0
 
+    # Client-provided epoch (ms since Unix epoch) for the first chunk.
+    # Used to anchor transcript timestamps to the client's wall clock.
+    first_timestamp_ms: int | None = None
+
     def buffer_end_offset_bytes(self) -> int:
         return self.buffer_start_offset_bytes + len(self.audio_buffer)
 

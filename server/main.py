@@ -140,14 +140,16 @@ def _build_transcript_update(
     base_offset_sec: float,
     buf: StreamBuffer,
 ) -> TranscriptUpdateMessage:
+    # Convert client epoch (ms) to seconds; fall back to 0 if not set.
+    epoch_sec = (buf.first_timestamp_ms / 1000.0) if buf.first_timestamp_ms else 0.0
     return {
         "type": "transcript_update",
         "session_id": session.session_id,
         "segments": [
             {
                 "id": f"seg-{session.session_id[:8]}-{stream_id}-{buf.last_seq}-{i}",
-                "start_sec": float(base_offset_sec + seg.start_sec),
-                "end_sec": float(base_offset_sec + seg.end_sec),
+                "start_sec": float(epoch_sec + base_offset_sec + seg.start_sec),
+                "end_sec": float(epoch_sec + base_offset_sec + seg.end_sec),
                 "text": seg.text,
                 "stream_tags": [stream_id],
                 "is_final": False,
@@ -328,6 +330,9 @@ async def _handle_client(ws: WebSocketServerProtocol, state: ServerState) -> Non
 
                     # Append to the correct stream buffer
                     buf = sess.get_buffer(stream_id)
+                    # Capture the client's epoch on the first chunk for this stream.
+                    if buf.first_timestamp_ms is None:
+                        buf.first_timestamp_ms = int(audio["timestamp_ms"])
                     buf.audio_buffer.extend(pcm_bytes)
                     buf.last_seq = max(buf.last_seq, int(seq))
 
