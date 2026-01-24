@@ -19,7 +19,7 @@ from .protocol_types import (
     StreamId,
     TranscriptUpdateMessage,
 )
-from .session_state import SessionState
+from .session_state import SessionState, StreamBuffer
 from .whisper_backend import WhisperBackend, create_backend
 
 
@@ -133,25 +133,90 @@ class ServerState:
         self.lock = asyncio.Lock()
 
 
-def _build_transcript_update(session: SessionState, segments: list, base_offset_sec: float) -> TranscriptUpdateMessage:
-    # Use streams_seen to tag; stable ordering for JSON output.
-    tags = sorted(session.streams_seen)
+def _build_transcript_update(
+    session: SessionState,
+    stream_id: StreamId,
+    segments: list,
+    base_offset_sec: float,
+    buf: StreamBuffer,
+) -> TranscriptUpdateMessage:
     return {
         "type": "transcript_update",
         "session_id": session.session_id,
         "segments": [
             {
-                "id": f"seg-{session.session_id[:8]}-{session.last_seq}-{i}",
+                "id": f"seg-{session.session_id[:8]}-{stream_id}-{buf.last_seq}-{i}",
                 "start_sec": float(base_offset_sec + seg.start_sec),
                 "end_sec": float(base_offset_sec + seg.end_sec),
                 "text": seg.text,
-                "stream_tags": cast(list[StreamId], tags) if tags else cast(list[StreamId], ["mic"]),
+                "stream_tags": [stream_id],
                 "is_final": False,
                 "full_context_available": False,
             }
             for i, seg in enumerate(segments)
         ],
     }
+
+
+async def _transcribe_stream(
+    state: ServerState,
+    sess: SessionState,
+    stream_id: StreamId,
+    buf: StreamBuffer,
+    min_new_audio_sec: float,
+    window_sec: float,
+    max_buffer_sec: float,
+    socket_map: dict[str, set[WebSocketServerProtocol]],
+) -> None:
+    """Transcribe a single stream buffer and send updates."""
+    bps = sess.bytes_per_second()
+    if bps <= 0:
+        return
+
+    buf.trim_to_max_bytes(int(max_buffer_sec * bps))
+
+    end_off = buf.buffer_end_offset_bytes()
+    new_bytes = end_off - buf.last_transcribed_offset_bytes
+    if new_bytes < int(min_new_audio_sec * bps):
+        return
+
+    window_bytes = int(window_sec * bps)
+    window_end = end_off
+    window_start = max(buf.last_transcribed_offset_bytes, window_end - window_bytes)
+
+    rel_start = window_start - buf.buffer_start_offset_bytes
+    rel_end = window_end - buf.buffer_start_offset_bytes
+    if rel_start < 0:
+        rel_start = 0
+    if rel_end <= rel_start:
+        return
+
+    pcm = bytes(buf.audio_buffer[rel_start:rel_end])
+    samples = _pcm_s16le_bytes_to_float32(pcm)
+    base_offset_sec = float(window_start) / float(bps)
+
+    # Avoid blocking the event loop.
+    segments = await asyncio.to_thread(state.backend.transcribe, samples, sess.sample_rate_hz)
+
+    sockets = socket_map.get(sess.session_id, set())
+    if segments and sockets:
+        update = _build_transcript_update(sess, stream_id, segments, base_offset_sec, buf)
+        payload = json.dumps(update)
+        dead: list[WebSocketServerProtocol] = []
+        for ws in sockets:
+            try:
+                await ws.send(payload)
+            except Exception:
+                dead.append(ws)
+        if dead:
+            async with state.lock:
+                sset = state.session_sockets.get(sess.session_id)
+                if sset:
+                    for ws in dead:
+                        sset.discard(ws)
+
+    # Commit everything up to window_end.
+    buf.last_transcribed_offset_bytes = window_end
 
 
 async def _transcription_loop(state: ServerState) -> None:
@@ -167,54 +232,21 @@ async def _transcription_loop(state: ServerState) -> None:
                 socket_map = {k: set(v) for k, v in state.session_sockets.items()}
 
             for sess in sessions:
-                bps = sess.bytes_per_second()
-                if bps <= 0:
-                    continue
-
-                sess.trim_to_max_bytes(int(max_buffer_sec * bps))
-
-                end_off = sess.buffer_end_offset_bytes()
-                new_bytes = end_off - sess.last_transcribed_offset_bytes
-                if new_bytes < int(min_new_audio_sec * bps):
-                    continue
-
-                window_bytes = int(window_sec * bps)
-                window_end = end_off
-                window_start = max(sess.last_transcribed_offset_bytes, window_end - window_bytes)
-
-                rel_start = window_start - sess.buffer_start_offset_bytes
-                rel_end = window_end - sess.buffer_start_offset_bytes
-                if rel_start < 0:
-                    rel_start = 0
-                if rel_end <= rel_start:
-                    continue
-
-                pcm = bytes(sess.audio_buffer[rel_start:rel_end])
-                samples = _pcm_s16le_bytes_to_float32(pcm)
-                base_offset_sec = float(window_start) / float(bps)
-
-                # Avoid blocking the event loop.
-                segments = await asyncio.to_thread(state.backend.transcribe, samples, sess.sample_rate_hz)
-
-                sockets = socket_map.get(sess.session_id, set())
-                if segments and sockets:
-                    update = _build_transcript_update(sess, segments, base_offset_sec)
-                    payload = json.dumps(update)
-                    dead: list[WebSocketServerProtocol] = []
-                    for ws in sockets:
-                        try:
-                            await ws.send(payload)
-                        except Exception:
-                            dead.append(ws)
-                    if dead:
-                        async with state.lock:
-                            sset = state.session_sockets.get(sess.session_id)
-                            if sset:
-                                for ws in dead:
-                                    sset.discard(ws)
-
-                # Commit everything up to window_end for now.
-                sess.last_transcribed_offset_bytes = window_end
+                # Transcribe mic and system streams separately
+                for stream_id in ("mic", "system"):
+                    buf = sess.get_buffer(cast(StreamId, stream_id))
+                    # Only transcribe if there's any audio in this buffer
+                    if len(buf.audio_buffer) > 0:
+                        await _transcribe_stream(
+                            state,
+                            sess,
+                            cast(StreamId, stream_id),
+                            buf,
+                            min_new_audio_sec,
+                            window_sec,
+                            max_buffer_sec,
+                            socket_map,
+                        )
 
         except Exception:
             logger.exception("transcription loop error (continuing)")
@@ -294,9 +326,10 @@ async def _handle_client(ws: WebSocketServerProtocol, state: ServerState) -> Non
                         sess.updated_at = now_wall
                         state.session_sockets.setdefault(session_id, set()).add(ws)
 
-                    sess.streams_seen.add(stream_id)
-                    sess.audio_buffer.extend(pcm_bytes)
-                    sess.last_seq = max(sess.last_seq, int(seq))
+                    # Append to the correct stream buffer
+                    buf = sess.get_buffer(stream_id)
+                    buf.audio_buffer.extend(pcm_bytes)
+                    buf.last_seq = max(buf.last_seq, int(seq))
 
                 now = time.monotonic()
                 if now - last_log_at >= 2.0:
@@ -355,4 +388,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -7,7 +7,8 @@ function createWindow(): BrowserWindow {
     width: 1100,
     height: 800,
     webPreferences: {
-      preload: join(__dirname, "../preload/index.js"),
+      // Build preload as CommonJS for best compatibility.
+      preload: join(__dirname, "../preload/index.cjs"),
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -25,6 +26,11 @@ function createWindow(): BrowserWindow {
 
   return win;
 }
+
+ipcMain.on("preload:log", (_event, msg: unknown) => {
+  // Helpful for debugging when the preload fails to run/crashes.
+  console.log("[preload]", msg);
+});
 
 app.whenReady().then(() => {
   createWindow();

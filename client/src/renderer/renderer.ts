@@ -384,6 +384,14 @@ async function stop(): Promise<void> {
   };
 
   const suggestedName = `transcript-${session_id}.json`;
+  if (!window.audioClient?.saveTranscript) {
+    transcriptEl.textContent =
+      (transcriptEl.textContent ?? "") +
+      "\n[save error] Missing preload bridge (window.audioClient.saveTranscript). " +
+      "The Electron preload script may not be loading.\n";
+    return;
+  }
+
   const res = await window.audioClient.saveTranscript({
     suggestedName,
     jsonText: JSON.stringify(payload, null, 2)
