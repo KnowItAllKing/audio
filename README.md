@@ -35,8 +35,13 @@ This repo is set up as a **pnpm workspace** with **Turborepo** (`turbo.json`).
 # Then from repo root:
 uv sync --project server
 
-# Optional: WS_PORT=8765 (default), TRANSCRIPT_EVERY_N=10 (default)
-uv run --project server python -m server.main
+# Optional: WS_PORT=8765 (default)
+# Phase 3 knobs:
+#   TRANSCRIBE_INTERVAL_SEC=1.0
+#   MIN_NEW_AUDIO_SEC=2.0
+#   WINDOW_SEC=8.0
+#   MAX_BUFFER_SEC=600.0
+PYTHONPATH=.. uv run --project server python -m server.main
 ```
 
 ### Client (Node/TypeScript)
@@ -47,6 +52,15 @@ pnpm install
 
 # Run the headless test client directly
 cd client
+# Localhost (default):
+#   pnpm dev:test-client
+#
+# Or explicitly:
+#   WS_URL=ws://localhost:8765 pnpm dev:test-client
+#
+# Over Tailscale:
+#   WS_URL=ws://<server-tailnet-hostname>:8765 pnpm dev:test-client
+#
 # Optional:
 #   --interval-ms=100
 #   --duration-sec=600

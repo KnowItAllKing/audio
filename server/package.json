@@ -2,7 +2,7 @@
   "name": "audio-server",
   "private": true,
   "scripts": {
-    "dev": "cd .. && uv run --project server python -m server.main"
+    "dev": "cd .. && PYTHONPATH=.. uv run --project server python -m server.main"
   }
 }
 

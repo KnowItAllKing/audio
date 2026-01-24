@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import contextlib
 import json
 import logging
 import os
 import time
 from typing import Any, cast
 
+import numpy as np
 import websockets
 from websockets.server import WebSocketServerProtocol
 
@@ -16,6 +19,8 @@ from .protocol_types import (
     StreamId,
     TranscriptUpdateMessage,
 )
+from .session_state import SessionState
+from .whisper_backend import WhisperBackend, create_backend
 
 
 logger = logging.getLogger("server")
@@ -39,6 +44,17 @@ def _error(session_id: str, code: str, message: str) -> ErrorMessage:
         "code": code,
         "message": message,
     }
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using %s", name, raw, default)
+        return default
 
 
 def _validate_audio_chunk(obj: Any) -> AudioChunkMessage:
@@ -91,11 +107,125 @@ def _validate_audio_chunk(obj: Any) -> AudioChunkMessage:
     return cast(AudioChunkMessage, obj)
 
 
-async def _handle_client(ws: WebSocketServerProtocol) -> None:
+def _decode_audio_base64(b64: str) -> bytes:
+    try:
+        return base64.b64decode(b64, validate=True)
+    except Exception as e:
+        # Some base64 encoders omit padding; try permissive decode as fallback.
+        try:
+            return base64.b64decode(b64 + "==")
+        except Exception:
+            raise ValueError(f"invalid audio_base64: {e}") from e
+
+
+def _pcm_s16le_bytes_to_float32(pcm: bytes) -> np.ndarray:
+    if len(pcm) % 2 != 0:
+        pcm = pcm[: len(pcm) - 1]
+    i16 = np.frombuffer(pcm, dtype="<i2")
+    return i16.astype(np.float32) / 32768.0
+
+
+class ServerState:
+    def __init__(self) -> None:
+        self.sessions: dict[str, SessionState] = {}
+        self.session_sockets: dict[str, set[WebSocketServerProtocol]] = {}
+        self.backend: WhisperBackend = create_backend()
+        self.lock = asyncio.Lock()
+
+
+def _build_transcript_update(session: SessionState, segments: list, base_offset_sec: float) -> TranscriptUpdateMessage:
+    # Use streams_seen to tag; stable ordering for JSON output.
+    tags = sorted(session.streams_seen)
+    return {
+        "type": "transcript_update",
+        "session_id": session.session_id,
+        "segments": [
+            {
+                "id": f"seg-{session.session_id[:8]}-{session.last_seq}-{i}",
+                "start_sec": float(base_offset_sec + seg.start_sec),
+                "end_sec": float(base_offset_sec + seg.end_sec),
+                "text": seg.text,
+                "stream_tags": cast(list[StreamId], tags) if tags else cast(list[StreamId], ["mic"]),
+                "is_final": False,
+                "full_context_available": False,
+            }
+            for i, seg in enumerate(segments)
+        ],
+    }
+
+
+async def _transcription_loop(state: ServerState) -> None:
+    interval_sec = _env_float("TRANSCRIBE_INTERVAL_SEC", 1.0)
+    min_new_audio_sec = _env_float("MIN_NEW_AUDIO_SEC", 2.0)
+    window_sec = _env_float("WINDOW_SEC", 8.0)
+    max_buffer_sec = _env_float("MAX_BUFFER_SEC", 600.0)  # 10 minutes
+
+    while True:
+        try:
+            async with state.lock:
+                sessions = list(state.sessions.values())
+                socket_map = {k: set(v) for k, v in state.session_sockets.items()}
+
+            for sess in sessions:
+                bps = sess.bytes_per_second()
+                if bps <= 0:
+                    continue
+
+                sess.trim_to_max_bytes(int(max_buffer_sec * bps))
+
+                end_off = sess.buffer_end_offset_bytes()
+                new_bytes = end_off - sess.last_transcribed_offset_bytes
+                if new_bytes < int(min_new_audio_sec * bps):
+                    continue
+
+                window_bytes = int(window_sec * bps)
+                window_end = end_off
+                window_start = max(sess.last_transcribed_offset_bytes, window_end - window_bytes)
+
+                rel_start = window_start - sess.buffer_start_offset_bytes
+                rel_end = window_end - sess.buffer_start_offset_bytes
+                if rel_start < 0:
+                    rel_start = 0
+                if rel_end <= rel_start:
+                    continue
+
+                pcm = bytes(sess.audio_buffer[rel_start:rel_end])
+                samples = _pcm_s16le_bytes_to_float32(pcm)
+                base_offset_sec = float(window_start) / float(bps)
+
+                # Avoid blocking the event loop.
+                segments = await asyncio.to_thread(state.backend.transcribe, samples, sess.sample_rate_hz)
+
+                sockets = socket_map.get(sess.session_id, set())
+                if segments and sockets:
+                    update = _build_transcript_update(sess, segments, base_offset_sec)
+                    payload = json.dumps(update)
+                    dead: list[WebSocketServerProtocol] = []
+                    for ws in sockets:
+                        try:
+                            await ws.send(payload)
+                        except Exception:
+                            dead.append(ws)
+                    if dead:
+                        async with state.lock:
+                            sset = state.session_sockets.get(sess.session_id)
+                            if sset:
+                                for ws in dead:
+                                    sset.discard(ws)
+
+                # Commit everything up to window_end for now.
+                sess.last_transcribed_offset_bytes = window_end
+
+        except Exception:
+            logger.exception("transcription loop error (continuing)")
+
+        await asyncio.sleep(interval_sec)
+
+
+async def _handle_client(ws: WebSocketServerProtocol, state: ServerState) -> None:
     peer = getattr(ws, "remote_address", None)
     logger.info("client connected: %s", peer)
 
-    transcript_every_n = _env_int("TRANSCRIPT_EVERY_N", 10)
     last_log_at = 0.0
 
     try:
@@ -124,32 +254,54 @@ async def _handle_client(ws: WebSocketServerProtocol) -> None:
                 stream_id = cast(StreamId, audio["stream_id"])
                 seq = audio["seq"]
                 audio_len = len(audio["audio_base64"])
+                fmt = audio["audio_format"]
+
+                # MVP constraints
+                if fmt["encoding"] != "pcm_s16le":
+                    await ws.send(json.dumps(_error(session_id=session_id, code="bad_request", message="only pcm_s16le supported")))
+                    continue
+                if int(fmt["num_channels"]) != 1:
+                    await ws.send(json.dumps(_error(session_id=session_id, code="bad_request", message="only mono supported")))
+                    continue
+                if int(fmt["sample_rate_hz"]) <= 0:
+                    await ws.send(json.dumps(_error(session_id=session_id, code="bad_request", message="sample_rate_hz must be > 0")))
+                    continue
+
+                try:
+                    pcm_bytes = _decode_audio_base64(audio["audio_base64"])
+                except Exception as e:
+                    await ws.send(json.dumps(_error(session_id=session_id, code="bad_request", message=str(e))))
+                    continue
+
+                now_wall = time.time()
+                async with state.lock:
+                    sess = state.sessions.get(session_id)
+                    if sess is None:
+                        sess = SessionState(
+                            session_id=session_id,
+                            created_at=now_wall,
+                            updated_at=now_wall,
+                            sample_rate_hz=int(fmt["sample_rate_hz"]),
+                            num_channels=int(fmt["num_channels"]),
+                        )
+                        state.sessions[session_id] = sess
+                        state.session_sockets.setdefault(session_id, set()).add(ws)
+                    else:
+                        # Lock format for the session for now.
+                        if sess.sample_rate_hz != int(fmt["sample_rate_hz"]) or sess.num_channels != int(fmt["num_channels"]):
+                            await ws.send(json.dumps(_error(session_id=session_id, code="bad_request", message="audio_format cannot change within a session")))
+                            continue
+                        sess.updated_at = now_wall
+                        state.session_sockets.setdefault(session_id, set()).add(ws)
+
+                    sess.streams_seen.add(stream_id)
+                    sess.audio_buffer.extend(pcm_bytes)
+                    sess.last_seq = max(sess.last_seq, int(seq))
 
                 now = time.monotonic()
                 if now - last_log_at >= 2.0:
                     logger.info("audio_chunk: session=%s stream=%s seq=%d audio_base64_len=%d", session_id, stream_id, seq, audio_len)
                     last_log_at = now
-
-                if transcript_every_n > 0 and (seq % transcript_every_n == 0):
-                    # Fake timestamps: assume ~100ms chunks by default (client may vary).
-                    end_sec = float(seq) * 0.1
-                    start_sec = max(0.0, end_sec - 1.0)
-                    update: TranscriptUpdateMessage = {
-                        "type": "transcript_update",
-                        "session_id": session_id,
-                        "segments": [
-                            {
-                                "id": f"dummy-{stream_id}-{seq}",
-                                "start_sec": start_sec,
-                                "end_sec": end_sec,
-                                "text": f"Dummy transcript up to seq {seq}",
-                                "stream_tags": [stream_id],
-                                "is_final": False,
-                                "full_context_available": False,
-                            }
-                        ],
-                    }
-                    await ws.send(json.dumps(update))
 
             else:
                 session_id = msg.get("session_id", "unknown") if isinstance(msg, dict) else "unknown"
@@ -171,6 +323,10 @@ async def _handle_client(ws: WebSocketServerProtocol) -> None:
             await ws.close()
         except Exception:
             pass
+    finally:
+        async with state.lock:
+            for sset in state.session_sockets.values():
+                sset.discard(ws)
 
 
 async def _run_server() -> None:
@@ -178,8 +334,15 @@ async def _run_server() -> None:
     port = _env_int("WS_PORT", 8765)
     logger.info("starting websocket server on ws://%s:%d", host, port)
 
-    async with websockets.serve(_handle_client, host, port, max_size=16 * 1024 * 1024):
-        await asyncio.Future()  # run forever
+    state = ServerState()
+    transcriber = asyncio.create_task(_transcription_loop(state))
+    try:
+        async with websockets.serve(lambda ws: _handle_client(ws, state), host, port, max_size=16 * 1024 * 1024):
+            await asyncio.Future()  # run forever
+    finally:
+        transcriber.cancel()
+        with contextlib.suppress(Exception):
+            await transcriber
 
 
 def main() -> None:
