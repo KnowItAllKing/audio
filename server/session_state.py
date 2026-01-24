@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from .protocol_types import StreamId
 
 
-@dataclass(slots=True)
+@dataclass()
 class StreamBuffer:
     """Per-stream audio buffer with tracking metadata."""
 
@@ -50,7 +50,7 @@ class StreamBuffer:
         self.last_transcribed_offset_bytes = max(self.last_transcribed_offset_bytes, self.buffer_start_offset_bytes)
 
 
-@dataclass(slots=True)
+@dataclass()
 class SessionState:
     session_id: str
 
