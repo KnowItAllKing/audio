@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from .protocol_types import StreamId
 
 
-@dataclass(slots=True)
+@dataclass
 class SessionState:
     session_id: str
 

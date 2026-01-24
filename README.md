@@ -41,6 +41,10 @@ uv sync --project server
 #   MIN_NEW_AUDIO_SEC=2.0
 #   WINDOW_SEC=8.0
 #   MAX_BUFFER_SEC=600.0
+# Enable real local Whisper (Phase 3.4, OpenAI reference whisper):
+#   (Requires Python 3.9.x for this repo)
+#   WHISPER_MODEL=base   (or small/medium/large-v3)
+#   WHISPER_DEVICE=cpu|cuda
 PYTHONPATH=.. uv run --project server python -m server.main
 ```
 

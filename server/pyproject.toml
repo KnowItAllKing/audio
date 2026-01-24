@@ -1,11 +1,14 @@
 [project]
 name = "audio-server"
 version = "0.0.0"
-requires-python = ">=3.11"
+requires-python = ">=3.9,<3.10"
 dependencies = [
   "websockets",
-  "numpy",
+  "numpy<2",
   "httpx",
+  "openai-whisper",
+  "numba>=0.59,<0.60",
+  "typing-extensions",
 ]
 
 [tool.uv]

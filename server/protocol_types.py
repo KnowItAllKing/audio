@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from typing import Literal, NotRequired, TypedDict
+from typing import Literal, TypedDict, Union
+
+
+from typing_extensions import NotRequired
 
 
 StreamId = Literal["mic", "system"]
@@ -17,7 +20,7 @@ class AudioChunkMessage(TypedDict):
     session_id: str
     stream_id: StreamId
     seq: int
-    timestamp_ms: int | float
+    timestamp_ms: Union[int, float]
     audio_format: AudioFormat
     audio_base64: str
 
@@ -52,4 +55,4 @@ class ErrorMessage(TypedDict):
     message: str
 
 
-BaseMessage = AudioChunkMessage | ControlMessage | TranscriptUpdateMessage | ErrorMessage
+BaseMessage = Union[AudioChunkMessage, ControlMessage, TranscriptUpdateMessage, ErrorMessage]
