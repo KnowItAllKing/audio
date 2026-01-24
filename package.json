@@ -1,0 +1,10 @@
+{
+  "name": "audio-monorepo",
+  "private": true,
+  "scripts": {
+    "dev": "turbo run dev --parallel",
+    "dev:client": "turbo run dev --filter=audio-client",
+    "dev:server": "turbo run dev --filter=audio-server"
+  }
+}
+
