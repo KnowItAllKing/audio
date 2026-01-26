@@ -148,9 +148,21 @@ def _build_transcript_update(
         "session_id": session.session_id,
         "segments": [
             {
-                "id": f"seg-{session.session_id[:8]}-{stream_id}-{buf.last_seq}-{i}",
-                "start_sec": float(epoch_sec + base_offset_sec + seg.start_sec),
-                "end_sec": float(epoch_sec + base_offset_sec + seg.end_sec),
+                # IMPORTANT: segment IDs must be stable identifiers for the client to
+                # append/replace segments without overwriting the whole buffer.
+                #
+                # Using `buf.last_seq` here can cause ID collisions when a client restarts
+                # its seq counter (common if the same session_id is reused). Since the
+                # server currently does incremental non-overlapping windows, we can use
+                # absolute timestamp ranges as a stable ID.
+                "id": (
+                    f"seg-{session.session_id[:8]}-{stream_id}-"
+                    f"{int(round((epoch_sec + base_offset_sec + float(seg.start_sec)) * 1000.0))}-"
+                    f"{int(round((epoch_sec + base_offset_sec + float(seg.end_sec)) * 1000.0))}-"
+                    f"{i}"
+                ),
+                "start_sec": float(epoch_sec + base_offset_sec + float(seg.start_sec)),
+                "end_sec": float(epoch_sec + base_offset_sec + float(seg.end_sec)),
                 "text": seg.text,
                 "stream_tags": [stream_id],
                 "is_final": False,
@@ -330,11 +342,21 @@ async def _handle_client(ws: WebSocketServerProtocol, state: ServerState) -> Non
 
                     # Append to the correct stream buffer
                     buf = sess.get_buffer(stream_id)
+                    seq_i = int(seq)
+                    # If the client seq counter jumps backwards significantly, treat it
+                    # as a new stream "run" under the same session_id and reset state.
+                    # This avoids sticky `last_seq` causing transcript segment ID collisions.
+                    if buf.last_seq >= 0 and (seq_i + 25) < buf.last_seq:
+                        if stream_id == "mic":
+                            sess.mic_buffer = StreamBuffer(stream_id="mic")
+                        else:
+                            sess.system_buffer = StreamBuffer(stream_id="system")
+                        buf = sess.get_buffer(stream_id)
                     # Capture the client's epoch on the first chunk for this stream.
                     if buf.first_timestamp_ms is None:
                         buf.first_timestamp_ms = int(audio["timestamp_ms"])
                     buf.audio_buffer.extend(pcm_bytes)
-                    buf.last_seq = max(buf.last_seq, int(seq))
+                    buf.last_seq = max(buf.last_seq, seq_i)
 
                 now = time.monotonic()
                 if now - last_log_at >= 2.0:
