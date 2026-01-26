@@ -6,6 +6,7 @@ dependencies = [
   "websockets",
   "numpy<2",
   "httpx",
+  "webrtcvad",
   "openai-whisper",
   "numba>=0.59,<0.60",
   "typing-extensions",

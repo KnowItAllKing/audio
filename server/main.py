@@ -10,6 +10,7 @@ import time
 from typing import Any, cast
 
 import numpy as np
+import webrtcvad
 import websockets
 from websockets.server import WebSocketServerProtocol
 
@@ -25,6 +26,67 @@ from .whisper_backend import WhisperBackend, create_backend
 
 
 logger = logging.getLogger("server")
+
+
+def _rms_energy(samples: np.ndarray) -> float:
+    """
+    Root-mean-square energy for float32 mono samples in [-1, 1].
+    Used as a lightweight VAD gate to avoid transcribing near-silence.
+    """
+    if samples.size == 0:
+        return 0.0
+    x = samples.astype(np.float32, copy=False)
+    return float(np.sqrt(np.mean(np.square(x))))
+
+
+def _webrtcvad_window_has_speech(
+    *,
+    pcm_s16le: bytes,
+    sample_rate_hz: int,
+    aggressiveness: int,
+    frame_ms: int,
+    min_speech_ratio: float,
+) -> bool:
+    """
+    Returns True if WebRTC VAD detects speech in enough frames within this window.
+    - pcm_s16le: mono, 16-bit little-endian PCM bytes
+    - sample_rate_hz: one of 8000/16000/32000/48000 for WebRTC VAD
+    - frame_ms: 10/20/30 (WebRTC VAD supported frame sizes)
+    - min_speech_ratio: fraction of frames that must be speech
+    """
+    if sample_rate_hz not in (8000, 16000, 32000, 48000):
+        return True
+    if frame_ms not in (10, 20, 30):
+        return True
+    if not pcm_s16le:
+        return False
+
+    # Ensure even byte length for int16 framing.
+    if (len(pcm_s16le) % 2) != 0:
+        pcm_s16le = pcm_s16le[: len(pcm_s16le) - 1]
+    if not pcm_s16le:
+        return False
+
+    bytes_per_frame = int(sample_rate_hz * (frame_ms / 1000.0) * 2)  # s16le mono
+    if bytes_per_frame <= 0:
+        return True
+
+    vad = webrtcvad.Vad(int(max(0, min(3, aggressiveness))))
+    total = 0
+    speech = 0
+    for off in range(0, len(pcm_s16le) - bytes_per_frame + 1, bytes_per_frame):
+        frame = pcm_s16le[off : off + bytes_per_frame]
+        total += 1
+        try:
+            if vad.is_speech(frame, sample_rate_hz):
+                speech += 1
+        except Exception:
+            # If VAD errors out on some frame, fail open for this window.
+            return True
+
+    if total == 0:
+        return False
+    return (speech / float(total)) >= float(min_speech_ratio)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -208,6 +270,28 @@ async def _transcribe_stream(
     pcm = bytes(buf.audio_buffer[rel_start:rel_end])
     samples = _pcm_s16le_bytes_to_float32(pcm)
     base_offset_sec = float(window_start) / float(bps)
+
+    # Always-on VAD gate (Discord-style): WebRTC VAD first, RMS second.
+    # We still advance last_transcribed_offset_bytes when skipping so we don't
+    # keep reprocessing silence/noise.
+    aggressiveness = _env_int("VAD_ML_AGGRESSIVENESS", 2)  # 0..3
+    frame_ms = _env_int("VAD_ML_FRAME_MS", 20)  # 10/20/30
+    min_ratio = _env_float("VAD_ML_MIN_SPEECH_RATIO", 0.12)
+    if not _webrtcvad_window_has_speech(
+        pcm_s16le=pcm,
+        sample_rate_hz=sess.sample_rate_hz,
+        aggressiveness=aggressiveness,
+        frame_ms=frame_ms,
+        min_speech_ratio=min_ratio,
+    ):
+        buf.last_transcribed_offset_bytes = window_end
+        return
+
+    thr = _env_float("VAD_RMS_THRESHOLD", 0.003)
+    rms = _rms_energy(samples)
+    if rms < thr:
+        buf.last_transcribed_offset_bytes = window_end
+        return
 
     # Avoid blocking the event loop.
     segments = await asyncio.to_thread(state.backend.transcribe, samples, sess.sample_rate_hz)

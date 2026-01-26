@@ -48,6 +48,17 @@ uv sync --project server
 PYTHONPATH=.. uv run --project server python -m server.main
 ```
 
+### Optional: VAD / noise filtering (server-side)
+
+The server runs an always-on VAD gate to avoid transcribing near-silence (reduces hallucinated short tokens).
+
+- **Tune WebRTC VAD**
+  - `VAD_ML_AGGRESSIVENESS=0..3` (default `2`, higher = more aggressive)
+  - `VAD_ML_FRAME_MS=10|20|30` (default `20`)
+  - `VAD_ML_MIN_SPEECH_RATIO=0..1` (default `0.12`)
+- **Tune RMS gate (runs after WebRTC VAD)**
+  - `VAD_RMS_THRESHOLD` (default `0.003`, higher = more aggressive)
+
 ### Client (Node/TypeScript)
 
 ```bash
