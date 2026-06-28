@@ -3,14 +3,18 @@ import { resolve } from "node:path";
 
 export default defineConfig({
   main: {
-    entry: resolve(__dirname, "src/main/index.ts")
+    build: {
+      lib: {
+        entry: resolve(__dirname, "src/main/index.ts")
+      }
+    }
   },
   preload: {
-    input: {
-      index: resolve(__dirname, "src/preload/index.ts")
-    },
     build: {
       outDir: resolve(__dirname, "out/preload"),
+      lib: {
+        entry: resolve(__dirname, "src/preload/index.ts")
+      },
       rollupOptions: {
         output: {
           // Preload scripts are most compatible as CommonJS.
@@ -29,4 +33,3 @@ export default defineConfig({
     }
   }
 });
-

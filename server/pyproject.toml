@@ -1,14 +1,13 @@
 [project]
 name = "audio-server"
 version = "0.0.0"
-requires-python = ">=3.9,<3.10"
+requires-python = ">=3.11,<3.12"
 dependencies = [
   "websockets",
   "numpy<2",
   "httpx",
   "webrtcvad",
   "openai-whisper",
-  "numba>=0.59,<0.60",
   "typing-extensions",
 ]
 
@@ -19,4 +18,8 @@ dev = [
 
 [tool.uv]
 # Keep uv files local to server/ for the monorepo.
-
+# Match the npm-side seven-day dependency cooling-off period. uv compares this
+# against package artifact upload times when resolving/locking.
+exclude-newer = "7 days"
+# Keep dependency-confusion protection on if extra indexes are added later.
+index-strategy = "first-index"

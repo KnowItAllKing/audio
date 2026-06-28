@@ -24,6 +24,13 @@ Monorepo for **audio streaming + transcription over WebSockets**.
 
 See `shared/protocol.md` for the WebSocket message schemas and expectations.
 
+## Security baseline
+
+Dependency installs are intentionally conservative: npm packages must be at
+least 7 days old, npm dependency install scripts are disabled, and Python
+package resolution uses the same 7-day cooling-off period through `uv`. See
+`SECURITY.md` for the full policy and audit commands.
+
 ## Phase 1: run the dummy pipeline (localhost)
 
 This repo is set up as a **pnpm workspace** with **Turborepo** (`turbo.json`).
@@ -33,7 +40,7 @@ This repo is set up as a **pnpm workspace** with **Turborepo** (`turbo.json`).
 ```bash
 # Install uv (see: https://docs.astral.sh/uv/)
 # Then from repo root:
-uv sync --project server
+uv sync --project server --extra dev
 
 # Optional: WS_PORT=8765 (default)
 # Phase 3 knobs:
@@ -42,10 +49,9 @@ uv sync --project server
 #   WINDOW_SEC=8.0
 #   MAX_BUFFER_SEC=600.0
 # Enable real local Whisper (Phase 3.4, OpenAI reference whisper):
-#   (Requires Python 3.9.x for this repo)
 #   WHISPER_MODEL=base   (or small/medium/large-v3)
 #   WHISPER_DEVICE=cpu|cuda
-PYTHONPATH=.. uv run --project server python -m server.main
+PYTHONPATH=. uv run --project server python -m server.main
 ```
 
 ### Optional: VAD / noise filtering (server-side)
@@ -62,7 +68,7 @@ The server runs an always-on VAD gate to avoid transcribing near-silence (reduce
 ### Client (Node/TypeScript)
 
 ```bash
-# One-time monorepo install (requires Node + pnpm)
+# One-time monorepo install from repo root (requires Node + pnpm)
 pnpm install
 
 # Run the headless test client directly
@@ -88,10 +94,15 @@ pnpm dev:test-client
 The Electron app captures **mic** and a user-selected **“system”** device (typically a virtual loopback input), streams both to the server, renders transcript updates, and saves transcript JSON on stop.
 
 ```bash
-cd client
 pnpm install
-pnpm dev
+pnpm --filter audio-client dev
 ```
+
+Dependency install scripts are disabled. Electron's npm package may fetch its
+app bundle the first time `electron` runs; treat that as an explicit local
+runtime setup step. On Tart shared volumes, the downloaded `.app` can fail
+macOS code-signature checks, so use a VM-local Electron bundle via
+`ELECTRON_OVERRIDE_DIST_PATH` if the GUI cannot launch.
 
 Legacy headless client (kept for quick protocol testing):
 
@@ -102,7 +113,7 @@ pnpm dev:test-client
 
 ### Optional: run via Turbo
 
-Once you add Turborepo as a dev dependency (e.g. `pnpm add -D turbo -w`), you can run:
+Turbo is available from the root package:
 
 ```bash
 # from repo root

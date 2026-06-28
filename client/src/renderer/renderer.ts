@@ -43,9 +43,10 @@ const recvStatsEl = $<HTMLSpanElement>("recvStats");
 
 function uuidv4(): string {
   // Browser-safe UUID (Chromium supports crypto.randomUUID)
-  if ("randomUUID" in crypto) return crypto.randomUUID();
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi.randomUUID === "function") return cryptoApi.randomUUID();
   const b = new Uint8Array(16);
-  crypto.getRandomValues(b);
+  cryptoApi.getRandomValues(b);
   b[6] = (b[6] & 0x0f) | 0x40;
   b[8] = (b[8] & 0x3f) | 0x80;
   const hex = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
@@ -394,4 +395,3 @@ stopBtn.addEventListener("click", () => void stop());
 sessionIdInput.value = uuidv4();
 setConnStatus("Disconnected");
 void refreshDevices();
-

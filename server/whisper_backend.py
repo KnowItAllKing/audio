@@ -73,7 +73,7 @@ class OpenAIWhisperBackend:
     Real local Whisper backend using OpenAI's reference whisper library (openai-whisper).
 
     Notes:
-    - Requires Python < 3.10 due to numba/llvmlite constraints.
+    - The server targets Python 3.11 so Torch/numba can stay on patched wheels.
     - Expects float32 mono samples in [-1, 1]. We resample to 16kHz if needed.
     """
 
@@ -209,4 +209,3 @@ def create_backend() -> WhisperBackend:
     except Exception as e:
         logger.exception("Failed to init openai-whisper backend (falling back to stub): %s", e)
         return LocalWhisperBackend()
-

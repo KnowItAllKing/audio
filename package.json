@@ -1,10 +1,17 @@
 {
   "name": "audio-monorepo",
   "private": true,
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=22.13.0 <27"
+  },
   "scripts": {
     "dev": "turbo run dev --parallel",
     "dev:client": "turbo run dev --filter=audio-client",
-    "dev:server": "turbo run dev --filter=audio-server"
+    "dev:server": "turbo run dev --filter=audio-server",
+    "security:audit": "pnpm audit --audit-level=moderate"
+  },
+  "devDependencies": {
+    "turbo": "^2.6.1"
   }
 }
-

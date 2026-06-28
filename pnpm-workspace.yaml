@@ -1,3 +1,22 @@
 packages:
   - "client"
   - "server"
+
+# Supply-chain policy:
+# - wait at least 7 days before accepting newly published packages
+# - fail if registry publish times are unavailable
+# - fail if no compatible version satisfies the age rule
+# - reject exotic transitive dependency specs
+minimumReleaseAge: 10080
+minimumReleaseAgeIgnoreMissingTime: false
+minimumReleaseAgeStrict: true
+trustLockfile: false
+blockExoticSubdeps: true
+autoInstallPeers: false
+overrides:
+  "esbuild@>=0.27.3 <0.28.1": "0.28.1"
+
+# Do not run dependency lifecycle/build scripts during install.
+ignoreScripts: true
+strictDepBuilds: true
+dangerouslyAllowAllBuilds: false

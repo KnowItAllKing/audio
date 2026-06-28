@@ -44,10 +44,10 @@ export class AudioStreamSender {
   private readonly maxUnacked: number;
 
   private seq = 0;
-  private pending = new Uint8Array(0);
+  private pending: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
 
   // Retry seams (no logic yet)
-  private readonly sentUnacked = new Map<number, Uint8Array>();
+  private readonly sentUnacked = new Map<number, Uint8Array<ArrayBufferLike>>();
 
   private sentCount = 0;
 
@@ -143,4 +143,3 @@ export class AudioStreamSender {
     return true;
   }
 }
-
