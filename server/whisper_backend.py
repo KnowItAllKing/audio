@@ -13,6 +13,24 @@ import numpy as np
 logger = logging.getLogger("server.whisper")
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using %s", name, raw, default)
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.lower() in ("1", "true", "yes", "on")
+
+
 @dataclass(frozen=True)
 class TranscriptSegment:
     start_sec: float
@@ -81,10 +99,14 @@ class OpenAIWhisperBackend:
         import whisper  # type: ignore
 
         self._whisper = whisper
-        self.model_name = os.environ.get("WHISPER_MODEL", "turbo")
+        self.model_name = os.environ.get("WHISPER_MODEL", "tiny")
         # whisper uses torch under the hood; device is typically "cpu" or "cuda".
         self.device = os.environ.get("WHISPER_DEVICE", "cpu")
         self.language = os.environ.get("WHISPER_LANGUAGE", "en")
+        self.condition_on_previous_text = _env_bool("WHISPER_CONDITION_ON_PREVIOUS_TEXT", False)
+        self.no_speech_threshold = _env_float("WHISPER_NO_SPEECH_THRESHOLD", 0.6)
+        self.logprob_threshold = _env_float("WHISPER_LOGPROB_THRESHOLD", -1.0)
+        self.compression_ratio_threshold = _env_float("WHISPER_COMPRESSION_RATIO_THRESHOLD", 2.4)
 
         self._model = whisper.load_model(self.model_name, device=self.device)
 
@@ -100,6 +122,11 @@ class OpenAIWhisperBackend:
             samples,
             language=self.language,
             fp16=False if self.device == "cpu" else None,
+            task="transcribe",
+            condition_on_previous_text=self.condition_on_previous_text,
+            no_speech_threshold=self.no_speech_threshold,
+            logprob_threshold=self.logprob_threshold,
+            compression_ratio_threshold=self.compression_ratio_threshold,
         )
 
         out: list[TranscriptSegment] = []

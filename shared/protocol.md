@@ -50,7 +50,7 @@ Send a chunk of audio data.
 - `audio_format.num_channels`: number (MVP expects `1`)
 - `audio_base64`: base64 string containing the raw PCM bytes
 
-### `control` (stub)
+### `control`
 
 Control messages for lifecycle and metadata (reserved for later phases).
 
@@ -60,8 +60,20 @@ Control messages for lifecycle and metadata (reserved for later phases).
 {
   "type": "control",
   "session_id": "1b0d8f1e-2e8c-4e5f-baf5-0c0f4d1d5c3b",
-  "command": "start",
-  "payload": {}
+  "command": "metadata",
+  "payload": {
+    "stream_speakers": {
+      "mic": {
+        "speaker_id": "local:mic",
+        "speaker_label": "You",
+        "speaker_source": "manual",
+        "speaker_confidence": 0.9
+      }
+    },
+    "participants": [
+      { "id": "zoom-user-1", "name": "Taylor" }
+    ]
+  }
 }
 ```
 
@@ -69,8 +81,29 @@ Control messages for lifecycle and metadata (reserved for later phases).
 
 - `type`: `"control"`
 - `session_id`: string UUID
-- `command`: `"start"` | `"stop"` | `"ping"` | `"pong"` | `"metadata"`
+- `command`: `"start"` | `"stop"` | `"ping"` | `"pong"` | `"metadata"` | `"speaker_activity"`
 - `payload`: optional object (command-specific)
+
+#### Speaker metadata
+
+- `metadata.payload.participants`: optional participant list for Zoom/RTMS-style speaker IDs.
+- `metadata.payload.stream_speakers`: optional fallback labels per audio source.
+- `speaker_activity.payload`: optional active-speaker interval, usually for `"system"` audio:
+
+```json
+{
+  "type": "control",
+  "session_id": "1b0d8f1e-2e8c-4e5f-baf5-0c0f4d1d5c3b",
+  "command": "speaker_activity",
+  "payload": {
+    "participant_id": "zoom-user-1",
+    "participant_name": "Taylor",
+    "stream_id": "system",
+    "start_timestamp_ms": 1730000000123,
+    "end_timestamp_ms": 1730000002345
+  }
+}
+```
 
 ## Server → Client messages
 
@@ -89,10 +122,15 @@ Incremental transcript updates. The client should treat these as **append/replac
       "id": "seg-0001",
       "start_sec": 0.0,
       "end_sec": 1.92,
-      "text": "[mic] hello world",
+      "text": "hello world",
       "stream_tags": ["mic"],
-      "is_final": false,
-      "full_context_available": false
+      "speaker_id": "local:mic",
+      "speaker_label": "You",
+      "speaker_source": "manual",
+      "speaker_confidence": 0.9,
+      "is_final": true,
+      "full_context_available": true,
+      "final_reason": "punctuation"
     }
   ]
 }
@@ -104,12 +142,16 @@ Incremental transcript updates. The client should treat these as **append/replac
 - `start_sec`: number
 - `end_sec`: number
 - `text`: string
-  - The transcript may contain **internal tags** to indicate source (e.g. `[mic]` / `[system]`) while still remaining plain text.
 - `stream_tags`: array of `"mic"` | `"system"` (may contain one or both)
+- `speaker_id`: stable speaker ID when available
+- `speaker_label`: display label such as `"You"` or a Zoom participant name
+- `speaker_source`: `"stream"` | `"zoom"` | `"diarization"` | `"manual"` | `"unknown"`
+- `speaker_confidence`: number from `0.0` to `1.0`
 - `is_final`: boolean
   - `false` = partial/intermediate hypothesis
   - `true` = final segment that should not change (except in rare future corrections)
 - `full_context_available`: boolean (reserved for future use)
+- `final_reason`: optional string, e.g. `"punctuation"`, `"pause"`, `"speaker_change"`, `"max_duration"`, `"stop"`
 
 ### `error`
 

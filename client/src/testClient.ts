@@ -26,8 +26,13 @@ type TranscriptUpdateMessage = {
     end_sec: number;
     text: string;
     stream_tags: StreamId[];
+    speaker_id: string;
+    speaker_label: string;
+    speaker_source: "stream" | "zoom" | "diarization" | "manual" | "unknown";
+    speaker_confidence: number;
     is_final: boolean;
     full_context_available: boolean;
+    final_reason?: string;
   }>;
 };
 
@@ -133,6 +138,23 @@ let stopTimer: ReturnType<typeof setTimeout> | undefined;
 
 ws.on("open", () => {
   console.log("connected");
+  ws.send(
+    JSON.stringify({
+      type: "control",
+      session_id: sessionId,
+      command: "metadata",
+      payload: {
+        stream_speakers: {
+          mic: {
+            speaker_id: "test:mic",
+            speaker_label: "Test mic",
+            speaker_source: "manual",
+            speaker_confidence: 0.9
+          }
+        }
+      }
+    })
+  );
 
   sendTimer = setInterval(() => {
     if (ws.readyState !== WebSocket.OPEN) return;
@@ -174,7 +196,9 @@ ws.on("message", (data: RawData) => {
     received += 1;
     const seg0 = tu.segments?.[0];
     const text = seg0?.text ?? "<no text>";
-    console.log(`transcript_update: received=${received} text=${JSON.stringify(text)}`);
+    const speaker = seg0?.speaker_label ?? "<no speaker>";
+    const final = seg0?.is_final ? "final" : "partial";
+    console.log(`transcript_update: received=${received} speaker=${JSON.stringify(speaker)} ${final} text=${JSON.stringify(text)}`);
   } else if (t === "error") {
     const err = msg as ErrorMessage;
     console.error(`server_error: code=${err.code} message=${err.message}`);
@@ -195,4 +219,3 @@ ws.on("close", (code: number, reason: Buffer) => {
 ws.on("error", (err: Error) => {
   console.error("ws error:", err);
 });
-

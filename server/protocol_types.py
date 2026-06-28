@@ -7,6 +7,7 @@ from typing_extensions import NotRequired
 
 
 StreamId = Literal["mic", "system"]
+SpeakerSource = Literal["stream", "zoom", "diarization", "manual", "unknown"]
 
 
 class AudioFormat(TypedDict):
@@ -28,7 +29,7 @@ class AudioChunkMessage(TypedDict):
 class ControlMessage(TypedDict):
     type: Literal["control"]
     session_id: str
-    command: Literal["start", "stop", "ping", "pong", "metadata"]
+    command: Literal["start", "stop", "ping", "pong", "metadata", "speaker_activity"]
     payload: NotRequired[dict]
 
 
@@ -38,8 +39,13 @@ class TranscriptSegment(TypedDict):
     end_sec: float
     text: str
     stream_tags: list[StreamId]
+    speaker_id: str
+    speaker_label: str
+    speaker_source: SpeakerSource
+    speaker_confidence: float
     is_final: bool
     full_context_available: bool
+    final_reason: NotRequired[str]
 
 
 class TranscriptUpdateMessage(TypedDict):

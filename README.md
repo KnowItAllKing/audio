@@ -6,7 +6,7 @@ Monorepo for **audio streaming + transcription over WebSockets**.
 
 - Stream raw audio from a client (mic + system audio)
 - Transcribe on a Python server (Whisper)
-- Send transcript updates back to the client in a consistent, future-proof JSON protocol
+- Send speaker-labeled phrase/sentence transcript updates back to the client
 
 ## Layout
 
@@ -43,14 +43,23 @@ This repo is set up as a **pnpm workspace** with **Turborepo** (`turbo.json`).
 uv sync --project server --extra dev
 
 # Optional: WS_PORT=8765 (default)
-# Phase 3 knobs:
+# Transcription scheduling knobs:
 #   TRANSCRIBE_INTERVAL_SEC=1.0
 #   MIN_NEW_AUDIO_SEC=2.0
 #   WINDOW_SEC=8.0
 #   MAX_BUFFER_SEC=600.0
+# Utterance grouping knobs:
+#   UTTERANCE_PAUSE_SEC=1.2
+#   UTTERANCE_MAX_SEC=14.0
+#   UTTERANCE_EMIT_PARTIALS=1
 # Enable real local Whisper (Phase 3.4, OpenAI reference whisper):
-#   WHISPER_MODEL=base   (or small/medium/large-v3)
+#   WHISPER_MODEL=tiny   (default; use base/small/medium/large-v3 when resources allow)
 #   WHISPER_DEVICE=cpu|cuda
+# Hallucination controls:
+#   WHISPER_CONDITION_ON_PREVIOUS_TEXT=0
+#   WHISPER_NO_SPEECH_THRESHOLD=0.6
+#   WHISPER_LOGPROB_THRESHOLD=-1.0
+#   WHISPER_COMPRESSION_RATIO_THRESHOLD=2.4
 PYTHONPATH=. uv run --project server python -m server.main
 ```
 
@@ -64,6 +73,60 @@ The server runs an always-on VAD gate to avoid transcribing near-silence (reduce
   - `VAD_ML_MIN_SPEECH_RATIO=0..1` (default `0.12`)
 - **Tune RMS gate (runs after WebRTC VAD)**
   - `VAD_RMS_THRESHOLD` (default `0.003`, higher = more aggressive)
+
+### Speaker labels and utterances
+
+The protocol separates audio source tags from speaker identity:
+
+- `stream_tags`: audio provenance, currently `mic` and/or `system`
+- `speaker_id` / `speaker_label`: person label when known
+- `speaker_source`: `manual`, `stream`, `zoom`, `diarization`, or `unknown`
+
+Without Zoom metadata or diarization, mic defaults to `You` and system audio
+defaults to `System audio`. The Electron client sends editable local labels.
+Future Zoom RTMS events should be forwarded as `control:speaker_activity` so
+the server can map participant names onto system-audio transcript utterances.
+
+### Mock Zoom RTMS testing
+
+`server/rtms_mock.py` provides a spec-shaped Zoom RTMS mock for local tests:
+
+- `msg_type: 6` event updates for participants and active speaker changes
+- `msg_type: 14` L16/16k/mono audio payloads
+- `msg_type: 17` transcript payload shape for parity checks
+- deterministic random meeting scripts and tone-coded synthetic audio
+
+The mock pipeline test adapts those RTMS messages into the local websocket
+protocol, decodes the generated tone audio with a fake ASR backend, and asserts
+the final transcript text and Zoom speaker labels match the generated script.
+
+```bash
+PYTHONPATH=. uv run --project server --extra dev pytest server/tests/test_rtms_mock_pipeline.py -q
+```
+
+### Real Whisper end-to-end test
+
+`make real-whisper-e2e` runs an opt-in local end-to-end smoke test with the
+actual server websocket path, generated macOS speech audio, and real Whisper
+transcription using the `tiny` model by default. It is not part of `make verify`
+because it loads a real model and requires `say` plus `afconvert`.
+
+```bash
+make real-whisper-e2e
+```
+
+`make real-whisper-hard-e2e` runs harder model-quality cases through the same
+real server path. These cover acronyms, product names, numbers, pause-based
+phrase boundaries, background chatter, and noise. Tiny-model failures are
+reported as expected failures by default; set `WHISPER_E2E_HARD_STRICT=1` to
+make them fail the command. Use a larger model by overriding
+`WHISPER_E2E_MODEL`.
+
+```bash
+make real-whisper-hard-e2e
+make real-whisper-hard-e2e WHISPER_E2E_MODEL=turbo
+WHISPER_E2E_HARD_STRICT=1 make real-whisper-hard-e2e
+```
 
 ### Client (Node/TypeScript)
 
@@ -92,6 +155,9 @@ pnpm dev:test-client
 ## Phase 4: Electron GUI client
 
 The Electron app captures **mic** and a user-selected **“system”** device (typically a virtual loopback input), streams both to the server, renders transcript updates, and saves transcript JSON on stop.
+The mic path has a mute button plus a client-side RMS gate, so quiet room noise
+is dropped before it reaches Whisper. A pause finalizes the current phrase even
+when the client stops sending silence.
 
 ```bash
 pnpm install

@@ -1,0 +1,226 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Literal, Optional, cast
+
+from .protocol_types import SpeakerSource, StreamId
+
+
+@dataclass(frozen=True)
+class SpeakerIdentity:
+    speaker_id: str
+    speaker_label: str
+    speaker_source: SpeakerSource
+    speaker_confidence: float
+
+
+@dataclass(frozen=True)
+class SpeakerActivity:
+    participant_id: str
+    participant_label: str
+    stream_id: StreamId
+    start_sec: float
+    end_sec: Optional[float]
+
+
+class SpeakerTracker:
+    def __init__(
+        self,
+        *,
+        local_label: str = "You",
+        system_label: str = "System audio",
+        active_speaker_ttl_sec: float = 15.0,
+    ) -> None:
+        self.active_speaker_ttl_sec = active_speaker_ttl_sec
+        self.participants: dict[str, str] = {}
+        self.stream_speakers: dict[StreamId, SpeakerIdentity] = {
+            "mic": SpeakerIdentity("local:mic", local_label, "stream", 0.75),
+            "system": SpeakerIdentity("system:unknown", system_label, "stream", 0.35),
+        }
+        self.activities: list[SpeakerActivity] = []
+
+    def apply_metadata(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+
+        participants = payload.get("participants")
+        if isinstance(participants, list):
+            for item in participants:
+                if not isinstance(item, dict):
+                    continue
+                participant_id = _optional_str(item.get("id") or item.get("participant_id") or item.get("participantId"))
+                name = _optional_str(item.get("name") or item.get("display_name") or item.get("displayName"))
+                if participant_id and name:
+                    self.participants[participant_id] = name
+
+        speaker_labels = payload.get("speaker_labels")
+        if isinstance(speaker_labels, dict):
+            for stream_id in ("mic", "system"):
+                label = _optional_str(speaker_labels.get(stream_id))
+                if label:
+                    self.set_stream_speaker(cast(StreamId, stream_id), label=label, source="manual")
+
+        stream_speakers = payload.get("stream_speakers")
+        if isinstance(stream_speakers, dict):
+            for stream_id in ("mic", "system"):
+                item = stream_speakers.get(stream_id)
+                if isinstance(item, str):
+                    self.set_stream_speaker(cast(StreamId, stream_id), label=item, source="manual")
+                elif isinstance(item, dict):
+                    label = _optional_str(
+                        item.get("speaker_label")
+                        or item.get("label")
+                        or item.get("name")
+                    )
+                    speaker_id = _optional_str(item.get("speaker_id") or item.get("id"))
+                    source = _speaker_source(item.get("speaker_source") or item.get("source"), default="manual")
+                    confidence_raw = item["speaker_confidence"] if "speaker_confidence" in item else item.get("confidence")
+                    confidence = _optional_float(confidence_raw)
+                    if label:
+                        self.set_stream_speaker(
+                            cast(StreamId, stream_id),
+                            label=label,
+                            speaker_id=speaker_id,
+                            source=source,
+                            confidence=confidence,
+                        )
+
+    def set_stream_speaker(
+        self,
+        stream_id: StreamId,
+        *,
+        label: str,
+        speaker_id: Optional[str] = None,
+        source: SpeakerSource = "manual",
+        confidence: Optional[float] = None,
+    ) -> None:
+        if not speaker_id:
+            speaker_id = "local:mic" if stream_id == "mic" else "system:unknown"
+        if confidence is None:
+            confidence = 0.85 if source == "manual" else 0.75
+        self.stream_speakers[stream_id] = SpeakerIdentity(
+            speaker_id=speaker_id,
+            speaker_label=label,
+            speaker_source=source,
+            speaker_confidence=_clamp_confidence(confidence),
+        )
+
+    def apply_activity(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+
+        stream_id = payload.get("stream_id") or payload.get("streamId") or "system"
+        if stream_id not in ("mic", "system"):
+            return
+
+        participant_id = _optional_str(
+            payload.get("participant_id")
+            or payload.get("participantId")
+            or payload.get("speaker_id")
+            or payload.get("speakerId")
+            or payload.get("id")
+        )
+        if not participant_id:
+            return
+
+        label = _optional_str(
+            payload.get("participant_name")
+            or payload.get("participantName")
+            or payload.get("speaker_label")
+            or payload.get("speakerLabel")
+            or payload.get("name")
+        )
+        if not label:
+            label = self.participants.get(participant_id, participant_id)
+
+        start_sec = _read_time_sec(payload, "start")
+        if start_sec is None:
+            return
+        end_sec = _read_time_sec(payload, "end")
+        if end_sec is not None and end_sec < start_sec:
+            end_sec = start_sec
+
+        self.activities.append(
+            SpeakerActivity(
+                participant_id=participant_id,
+                participant_label=label,
+                stream_id=cast(StreamId, stream_id),
+                start_sec=start_sec,
+                end_sec=end_sec,
+            )
+        )
+        if len(self.activities) > 500:
+            self.activities = self.activities[-500:]
+
+    def resolve(self, *, stream_id: StreamId, start_sec: float, end_sec: float) -> SpeakerIdentity:
+        activity = self._activity_for(stream_id=stream_id, start_sec=start_sec, end_sec=end_sec)
+        if activity:
+            return SpeakerIdentity(
+                speaker_id=f"zoom:{activity.participant_id}",
+                speaker_label=activity.participant_label,
+                speaker_source="zoom",
+                speaker_confidence=0.95,
+            )
+        return self.stream_speakers[stream_id]
+
+    def _activity_for(self, *, stream_id: StreamId, start_sec: float, end_sec: float) -> Optional[SpeakerActivity]:
+        if stream_id != "system":
+            return None
+        mid_sec = start_sec + max(0.0, end_sec - start_sec) / 2.0
+        matches: list[SpeakerActivity] = []
+        for activity in self.activities:
+            if activity.stream_id != stream_id:
+                continue
+            if activity.start_sec > mid_sec:
+                continue
+            if activity.end_sec is None:
+                if mid_sec - activity.start_sec > self.active_speaker_ttl_sec:
+                    continue
+            elif activity.end_sec + 0.25 < mid_sec:
+                continue
+            matches.append(activity)
+        if not matches:
+            return None
+        return max(matches, key=lambda item: item.start_sec)
+
+
+def _read_time_sec(payload: dict[str, Any], prefix: Literal["start", "end"]) -> Optional[float]:
+    sec_keys = [f"{prefix}_sec", f"{prefix}Sec"]
+    ms_keys = [f"{prefix}_timestamp_ms", f"{prefix}TimestampMs", f"{prefix}Time", f"{prefix}_time"]
+    for key in sec_keys:
+        value = _optional_float(payload.get(key))
+        if value is not None:
+            return value
+    for key in ms_keys:
+        value = _optional_float(payload.get(key))
+        if value is not None:
+            return value / 1000.0
+    return None
+
+
+def _optional_str(value: Any) -> Optional[str]:
+    if isinstance(value, str):
+        value = value.strip()
+        return value or None
+    return None
+
+
+def _optional_float(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _speaker_source(value: Any, *, default: SpeakerSource) -> SpeakerSource:
+    if value in ("stream", "zoom", "diarization", "manual", "unknown"):
+        return cast(SpeakerSource, value)
+    return default
+
+
+def _clamp_confidence(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))

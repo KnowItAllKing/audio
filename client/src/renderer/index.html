@@ -87,6 +87,23 @@
         border-color: rgba(251, 113, 133, 0.55);
         background: rgba(251, 113, 133, 0.12);
       }
+      input[type="checkbox"] {
+        width: auto;
+      }
+      input[type="range"] {
+        padding: 10px 0;
+      }
+      .inlineControl {
+        min-height: 41px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        box-sizing: border-box;
+        padding: 9px 10px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.06);
+      }
       .row {
         display: grid;
         grid-template-columns: 1fr 1fr 1fr;
@@ -164,6 +181,50 @@
 
         <div style="height: 12px"></div>
 
+        <div class="grid">
+          <div>
+            <label for="micLabel">Mic speaker label</label>
+            <input id="micLabel" type="text" value="You" />
+          </div>
+          <div>
+            <label for="sysLabel">System fallback label</label>
+            <input id="sysLabel" type="text" value="System audio" />
+          </div>
+        </div>
+
+        <div style="height: 12px"></div>
+
+        <div class="grid">
+          <div>
+            <label for="micMuteBtn">Mic mute</label>
+            <button id="micMuteBtn" class="primary" type="button">Mute mic</button>
+          </div>
+          <div>
+            <label for="micFilterEnabled">Mic garbage filter</label>
+            <div class="inlineControl">
+              <input id="micFilterEnabled" type="checkbox" checked />
+              <span class="subtle">Enabled</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="height: 12px"></div>
+
+        <div class="grid">
+          <div>
+            <label for="micGateThreshold">Mic gate threshold</label>
+            <input id="micGateThreshold" type="range" min="0.001" max="0.05" step="0.001" value="0.012" />
+          </div>
+          <div>
+            <label for="micGateStatus">Mic gate status</label>
+            <div class="inlineControl">
+              <span id="micGateStatus" class="pill">idle</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="height: 12px"></div>
+
         <div class="row">
           <button id="refreshBtn">Refresh devices</button>
           <button id="startBtn" class="primary">Connect &amp; Start</button>
@@ -195,4 +256,3 @@
     <script type="module" src="./renderer.ts"></script>
   </body>
 </html>
-

@@ -1,4 +1,5 @@
 import { AudioStreamSender, type StreamId } from "./audio/AudioStreamSender";
+import { MicInputFilter, type MicInputFilterDecision } from "./audio/MicInputFilter";
 
 type TranscriptSegment = {
   id: string;
@@ -6,8 +7,13 @@ type TranscriptSegment = {
   end_sec: number;
   text: string;
   stream_tags: StreamId[];
+  speaker_id: string;
+  speaker_label: string;
+  speaker_source: "stream" | "zoom" | "diarization" | "manual" | "unknown";
+  speaker_confidence: number;
   is_final: boolean;
   full_context_available: boolean;
+  final_reason?: string;
 };
 
 type TranscriptUpdateMessage = {
@@ -23,6 +29,13 @@ type ErrorMessage = {
   message: string;
 };
 
+type ControlMessage = {
+  type: "control";
+  session_id: string;
+  command: "metadata" | "speaker_activity" | "stop" | "ping";
+  payload?: Record<string, unknown>;
+};
+
 // AudioChunkMessage type lives in AudioStreamSender module.
 
 const $ = <T extends HTMLElement>(id: string) =>
@@ -32,6 +45,12 @@ const wsUrlInput = $<HTMLInputElement>("wsUrl");
 const sessionIdInput = $<HTMLInputElement>("sessionId");
 const micSelect = $<HTMLSelectElement>("micSelect");
 const sysSelect = $<HTMLSelectElement>("sysSelect");
+const micLabelInput = $<HTMLInputElement>("micLabel");
+const sysLabelInput = $<HTMLInputElement>("sysLabel");
+const micMuteBtn = $<HTMLButtonElement>("micMuteBtn");
+const micFilterEnabledInput = $<HTMLInputElement>("micFilterEnabled");
+const micGateThresholdInput = $<HTMLInputElement>("micGateThreshold");
+const micGateStatusEl = $<HTMLSpanElement>("micGateStatus");
 const refreshBtn = $<HTMLButtonElement>("refreshBtn");
 const startBtn = $<HTMLButtonElement>("startBtn");
 const stopBtn = $<HTMLButtonElement>("stopBtn");
@@ -87,6 +106,29 @@ function floatToPcmS16leMono(input: Float32Array): Int16Array {
   return out;
 }
 
+function micGateThreshold(): number {
+  return Number.parseFloat(micGateThresholdInput.value) || 0.012;
+}
+
+function updateMicMuteUi(): void {
+  micMuteBtn.textContent = micMuted ? "Unmute mic" : "Mute mic";
+  micMuteBtn.classList.toggle("danger", micMuted);
+  micMuteBtn.classList.toggle("primary", !micMuted);
+  micMuteBtn.setAttribute("aria-pressed", String(micMuted));
+}
+
+function updateMicGateStatus(decision: MicInputFilterDecision | null = micLastDecision): void {
+  const threshold = micGateThreshold();
+  if (!decision) {
+    micGateStatusEl.textContent = `idle gate=${threshold.toFixed(3)}`;
+    micGateStatusEl.classList.remove("good", "bad");
+    return;
+  }
+  micGateStatusEl.textContent = `${decision.reason} rms=${decision.rms.toFixed(3)} gate=${threshold.toFixed(3)}`;
+  micGateStatusEl.classList.toggle("good", decision.shouldSend && decision.reason !== "muted");
+  micGateStatusEl.classList.toggle("bad", decision.reason === "muted");
+}
+
 type CaptureHandle = {
   streamId: StreamId;
   mediaStream: MediaStream;
@@ -107,6 +149,76 @@ let micSender: AudioStreamSender | null = null;
 let sysSender: AudioStreamSender | null = null;
 
 let captures: CaptureHandle[] = [];
+let micMuted = false;
+let micLastDecision: MicInputFilterDecision | null = null;
+const micInputFilter = new MicInputFilter();
+
+function sendControl(command: ControlMessage["command"], payload?: Record<string, unknown>): void {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const msg: ControlMessage = {
+    type: "control",
+    session_id: sessionIdInput.value.trim(),
+    command,
+    payload
+  };
+  ws.send(JSON.stringify(msg));
+}
+
+function sendSpeakerMetadata(): void {
+  const micLabel = micLabelInput.value.trim() || "You";
+  const sysLabel = sysLabelInput.value.trim() || "System audio";
+  sendControl("metadata", {
+    stream_speakers: {
+      mic: {
+        speaker_id: "local:mic",
+        speaker_label: micLabel,
+        speaker_source: "manual",
+        speaker_confidence: 0.9
+      },
+      system: {
+        speaker_id: "system:unknown",
+        speaker_label: sysLabel,
+        speaker_source: "manual",
+        speaker_confidence: 0.5
+      }
+    }
+  });
+}
+
+function updateSentStats(): void {
+  sentStatsEl.textContent = `mic=${micSender?.getSentCount() ?? 0} sys=${sysSender?.getSentCount() ?? 0}`;
+}
+
+function applyMicMuteToTracks(): void {
+  for (const capture of captures) {
+    if (capture.streamId !== "mic") continue;
+    for (const track of capture.mediaStream.getAudioTracks()) {
+      track.enabled = !micMuted;
+    }
+  }
+}
+
+function pushMicInput(input: Float32Array): void {
+  const decision = micInputFilter.decide(input, performance.now(), {
+    muted: micMuted,
+    enabled: micFilterEnabledInput.checked,
+    thresholdRms: micGateThreshold()
+  });
+  micLastDecision = decision;
+  updateMicGateStatus(decision);
+
+  if (!decision.shouldSend) return;
+
+  const pcm = floatToPcmS16leMono(input);
+  micSender?.pushPcmBytes(new Uint8Array(pcm.buffer));
+  updateSentStats();
+}
+
+function pushSystemInput(input: Float32Array): void {
+  const pcm = floatToPcmS16leMono(input);
+  sysSender?.pushPcmBytes(new Uint8Array(pcm.buffer));
+  updateSentStats();
+}
 
 function renderTranscript(): void {
   const segs = [...segmentsById.values()].sort((a, b) => {
@@ -117,9 +229,12 @@ function renderTranscript(): void {
   transcriptEl.textContent = segs
     .map((s) => {
       const tags = s.stream_tags.join(",");
-      return `[${formatTime(s.start_sec)}–${formatTime(s.end_sec)}] [${tags}] ${s.text}`;
+      const speaker = s.speaker_label || s.speaker_id || tags;
+      const finalMark = s.is_final ? "" : " ...";
+      return `[${formatTime(s.start_sec)}–${formatTime(s.end_sec)}] ${speaker} [${tags}] ${s.text}${finalMark}`;
     })
     .join("\n");
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
 
 async function requestPermissionOnce(): Promise<void> {
@@ -180,9 +295,13 @@ async function startCaptureForDevice(
   processor.onaudioprocess = (ev) => {
     // We take channel 0 (mono). If input is stereo, this is a simple downmix.
     const input = ev.inputBuffer.getChannelData(0);
-    const pcm = floatToPcmS16leMono(input);
-    sender.pushPcmBytes(new Uint8Array(pcm.buffer));
-    sentStatsEl.textContent = `mic=${micSender?.getSentCount() ?? 0} sys=${sysSender?.getSentCount() ?? 0}`;
+    if (streamId === "mic") {
+      pushMicInput(input);
+    } else {
+      const pcm = floatToPcmS16leMono(input);
+      sender.pushPcmBytes(new Uint8Array(pcm.buffer));
+      updateSentStats();
+    }
   };
 
   source.connect(processor);
@@ -215,7 +334,10 @@ async function start(): Promise<void> {
   recvCount = 0;
   micSender = null;
   sysSender = null;
+  micInputFilter.reset();
+  micLastDecision = null;
   sentStatsEl.textContent = "mic=0 sys=0";
+  updateMicGateStatus(null);
   recvStatsEl.textContent = "0";
   transcriptEl.textContent = "";
   setLastUpdate(null);
@@ -230,6 +352,7 @@ async function start(): Promise<void> {
     setConnStatus("Connected", "good");
     startBtn.disabled = true;
     stopBtn.disabled = false;
+    sendSpeakerMetadata();
 
     const micId = micSelect.value;
     const sysId = sysSelect.value;
@@ -260,9 +383,7 @@ async function start(): Promise<void> {
       // Point processor to the new sender.
       handle.processor.onaudioprocess = (ev) => {
         const input = ev.inputBuffer.getChannelData(0);
-        const pcm = floatToPcmS16leMono(input);
-        micSender?.pushPcmBytes(new Uint8Array(pcm.buffer));
-        sentStatsEl.textContent = `mic=${micSender?.getSentCount() ?? 0} sys=${sysSender?.getSentCount() ?? 0}`;
+        pushMicInput(input);
       };
       handles.push(handle);
     }
@@ -283,14 +404,13 @@ async function start(): Promise<void> {
       });
       handle.processor.onaudioprocess = (ev) => {
         const input = ev.inputBuffer.getChannelData(0);
-        const pcm = floatToPcmS16leMono(input);
-        sysSender?.pushPcmBytes(new Uint8Array(pcm.buffer));
-        sentStatsEl.textContent = `mic=${micSender?.getSentCount() ?? 0} sys=${sysSender?.getSentCount() ?? 0}`;
+        pushSystemInput(input);
       };
       handles.push(handle);
     }
 
     captures = handles;
+    applyMicMuteToTracks();
   };
 
   ws.onmessage = (ev) => {
@@ -340,6 +460,8 @@ async function stop(): Promise<void> {
 
   if (ws && ws.readyState === WebSocket.OPEN) {
     try {
+      sendControl("stop", {});
+      await new Promise((resolve) => setTimeout(resolve, 150));
       ws.close();
     } catch {}
   }
@@ -390,8 +512,25 @@ async function stop(): Promise<void> {
 refreshBtn.addEventListener("click", () => void refreshDevices());
 startBtn.addEventListener("click", () => void start());
 stopBtn.addEventListener("click", () => void stop());
+micMuteBtn.addEventListener("click", () => {
+  micMuted = !micMuted;
+  micInputFilter.reset();
+  applyMicMuteToTracks();
+  updateMicMuteUi();
+  updateMicGateStatus(null);
+});
+micFilterEnabledInput.addEventListener("change", () => {
+  micInputFilter.reset();
+  updateMicGateStatus(null);
+});
+micGateThresholdInput.addEventListener("input", () => {
+  micInputFilter.reset();
+  updateMicGateStatus(null);
+});
 
 // Initial state
 sessionIdInput.value = uuidv4();
 setConnStatus("Disconnected");
+updateMicMuteUi();
+updateMicGateStatus(null);
 void refreshDevices();

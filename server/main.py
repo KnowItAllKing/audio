@@ -7,25 +7,42 @@ import json
 import logging
 import os
 import time
+import warnings
 from typing import Any, cast
 
 import numpy as np
-import webrtcvad
 import websockets
-from websockets.server import WebSocketServerProtocol
+from websockets import ServerConnection
 
 from .protocol_types import (
     AudioChunkMessage,
+    ControlMessage,
     ErrorMessage,
     StreamId,
+    TranscriptSegment,
     TranscriptUpdateMessage,
 )
 from .session_state import SessionState, StreamBuffer
+from .speakers import SpeakerTracker
 from .transcription import bytes_per_second, compute_window, eligible_for_transcription
+from .utterances import UtteranceAssembler, UtteranceAssemblerConfig
 from .whisper_backend import WhisperBackend, create_backend
 
 
 logger = logging.getLogger("server")
+
+
+def _new_webrtc_vad(aggressiveness: int) -> Any:
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="pkg_resources is deprecated as an API.*",
+            category=UserWarning,
+            module="webrtcvad",
+        )
+        import webrtcvad
+
+    return webrtcvad.Vad(aggressiveness)
 
 
 def _rms_energy(samples: np.ndarray) -> float:
@@ -71,7 +88,7 @@ def _webrtcvad_window_has_speech(
     if bytes_per_frame <= 0:
         return True
 
-    vad = webrtcvad.Vad(int(max(0, min(3, aggressiveness))))
+    vad = _new_webrtc_vad(int(max(0, min(3, aggressiveness))))
     total = 0
     speech = 0
     for off in range(0, len(pcm_s16le) - bytes_per_frame + 1, bytes_per_frame):
@@ -118,6 +135,13 @@ def _env_float(name: str, default: float) -> float:
     except ValueError:
         logger.warning("Invalid %s=%r; using %s", name, raw, default)
         return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.lower() in ("1", "true", "yes", "on")
 
 
 def _validate_audio_chunk(obj: Any) -> AudioChunkMessage:
@@ -170,6 +194,27 @@ def _validate_audio_chunk(obj: Any) -> AudioChunkMessage:
     return cast(AudioChunkMessage, obj)
 
 
+def _validate_control_message(obj: Any) -> ControlMessage:
+    if not isinstance(obj, dict):
+        raise ValueError("message must be a JSON object")
+    if obj.get("type") != "control":
+        raise ValueError('type must be "control"')
+
+    session_id = obj.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("session_id must be a non-empty string")
+
+    command = obj.get("command")
+    if command not in ("start", "stop", "ping", "pong", "metadata", "speaker_activity"):
+        raise ValueError("unsupported control command")
+
+    payload = obj.get("payload")
+    if payload is not None and not isinstance(payload, dict):
+        raise ValueError("control payload must be an object")
+
+    return cast(ControlMessage, obj)
+
+
 def _decode_audio_base64(b64: str) -> bytes:
     try:
         return base64.b64decode(b64, validate=True)
@@ -191,48 +236,97 @@ def _pcm_s16le_bytes_to_float32(pcm: bytes) -> np.ndarray:
 class ServerState:
     def __init__(self) -> None:
         self.sessions: dict[str, SessionState] = {}
-        self.session_sockets: dict[str, set[WebSocketServerProtocol]] = {}
+        self.session_sockets: dict[str, set[ServerConnection]] = {}
         self.backend: WhisperBackend = create_backend()
+        self.utterance_config = UtteranceAssemblerConfig(
+            pause_sec=_env_float("UTTERANCE_PAUSE_SEC", 1.2),
+            max_duration_sec=_env_float("UTTERANCE_MAX_SEC", 14.0),
+            emit_partials=_env_bool("UTTERANCE_EMIT_PARTIALS", True),
+        )
+        self.utterance_assemblers: dict[str, UtteranceAssembler] = {}
+        self.speaker_trackers: dict[str, SpeakerTracker] = {}
         self.lock = asyncio.Lock()
 
+    def get_utterance_assembler(self, session_id: str) -> UtteranceAssembler:
+        assembler = self.utterance_assemblers.get(session_id)
+        if assembler is None:
+            assembler = UtteranceAssembler(session_id=session_id, config=self.utterance_config)
+            self.utterance_assemblers[session_id] = assembler
+        return assembler
 
-def _build_transcript_update(
-    session: SessionState,
-    stream_id: StreamId,
-    segments: list,
-    base_offset_sec: float,
-    buf: StreamBuffer,
-) -> TranscriptUpdateMessage:
-    # Convert client epoch (ms) to seconds; fall back to 0 if not set.
-    epoch_sec = (buf.first_timestamp_ms / 1000.0) if buf.first_timestamp_ms else 0.0
+    def get_speaker_tracker(self, session_id: str) -> SpeakerTracker:
+        tracker = self.speaker_trackers.get(session_id)
+        if tracker is None:
+            tracker = SpeakerTracker(
+                local_label=os.environ.get("MIC_SPEAKER_LABEL", "You"),
+                system_label=os.environ.get("SYSTEM_SPEAKER_LABEL", "System audio"),
+                active_speaker_ttl_sec=_env_float("SPEAKER_ACTIVITY_TTL_SEC", 15.0),
+            )
+            self.speaker_trackers[session_id] = tracker
+        return tracker
+
+
+def _build_transcript_update(session_id: str, segments: list[TranscriptSegment]) -> TranscriptUpdateMessage:
     return {
         "type": "transcript_update",
-        "session_id": session.session_id,
-        "segments": [
-            {
-                # IMPORTANT: segment IDs must be stable identifiers for the client to
-                # append/replace segments without overwriting the whole buffer.
-                #
-                # Using `buf.last_seq` here can cause ID collisions when a client restarts
-                # its seq counter (common if the same session_id is reused). Since the
-                # server currently does incremental non-overlapping windows, we can use
-                # absolute timestamp ranges as a stable ID.
-                "id": (
-                    f"seg-{session.session_id[:8]}-{stream_id}-"
-                    f"{int(round((epoch_sec + base_offset_sec + float(seg.start_sec)) * 1000.0))}-"
-                    f"{int(round((epoch_sec + base_offset_sec + float(seg.end_sec)) * 1000.0))}-"
-                    f"{i}"
-                ),
-                "start_sec": float(epoch_sec + base_offset_sec + float(seg.start_sec)),
-                "end_sec": float(epoch_sec + base_offset_sec + float(seg.end_sec)),
-                "text": seg.text,
-                "stream_tags": [stream_id],
-                "is_final": False,
-                "full_context_available": False,
-            }
-            for i, seg in enumerate(segments)
-        ],
+        "session_id": session_id,
+        "segments": segments,
     }
+
+
+def _assemble_transcript_segments(
+    state: ServerState,
+    session: SessionState,
+    stream_id: StreamId,
+    raw_segments: list,
+    base_offset_sec: float,
+    buf: StreamBuffer,
+) -> list[TranscriptSegment]:
+    # Convert client epoch (ms) to seconds; fall back to 0 if not set.
+    epoch_sec = (buf.first_timestamp_ms / 1000.0) if buf.first_timestamp_ms else 0.0
+    tracker = state.get_speaker_tracker(session.session_id)
+    assembler = state.get_utterance_assembler(session.session_id)
+
+    out: list[TranscriptSegment] = []
+    for seg in raw_segments:
+        start_sec = float(epoch_sec + base_offset_sec + float(seg.start_sec))
+        end_sec = float(epoch_sec + base_offset_sec + float(seg.end_sec))
+        speaker = tracker.resolve(stream_id=stream_id, start_sec=start_sec, end_sec=end_sec)
+        out.extend(
+            item.to_protocol()
+            for item in assembler.push(
+                stream_id=stream_id,
+                start_sec=start_sec,
+                end_sec=end_sec,
+                text=seg.text,
+                speaker=speaker,
+            )
+        )
+    return out
+
+
+async def _send_transcript_segments(
+    state: ServerState,
+    session_id: str,
+    segments: list[TranscriptSegment],
+    sockets: set[ServerConnection],
+) -> None:
+    if not segments or not sockets:
+        return
+
+    payload = json.dumps(_build_transcript_update(session_id, segments))
+    dead: list[ServerConnection] = []
+    for ws in sockets:
+        try:
+            await ws.send(payload)
+        except Exception:
+            dead.append(ws)
+    if dead:
+        async with state.lock:
+            sset = state.session_sockets.get(session_id)
+            if sset:
+                for ws in dead:
+                    sset.discard(ws)
 
 
 async def _transcribe_stream(
@@ -243,7 +337,6 @@ async def _transcribe_stream(
     min_new_audio_sec: float,
     window_sec: float,
     max_buffer_sec: float,
-    socket_map: dict[str, set[WebSocketServerProtocol]],
 ) -> None:
     """Transcribe a single stream buffer and send updates."""
     bps = bytes_per_second(sess.sample_rate_hz, sess.num_channels)
@@ -296,22 +389,13 @@ async def _transcribe_stream(
     # Avoid blocking the event loop.
     segments = await asyncio.to_thread(state.backend.transcribe, samples, sess.sample_rate_hz)
 
-    sockets = socket_map.get(sess.session_id, set())
-    if segments and sockets:
-        update = _build_transcript_update(sess, stream_id, segments, base_offset_sec, buf)
-        payload = json.dumps(update)
-        dead: list[WebSocketServerProtocol] = []
-        for ws in sockets:
-            try:
-                await ws.send(payload)
-            except Exception:
-                dead.append(ws)
-        if dead:
-            async with state.lock:
-                sset = state.session_sockets.get(sess.session_id)
-                if sset:
-                    for ws in dead:
-                        sset.discard(ws)
+    protocol_segments: list[TranscriptSegment] = []
+    sockets: set[ServerConnection] = set()
+    if segments:
+        async with state.lock:
+            protocol_segments = _assemble_transcript_segments(state, sess, stream_id, segments, base_offset_sec, buf)
+            sockets = set(state.session_sockets.get(sess.session_id, set()))
+    await _send_transcript_segments(state, sess.session_id, protocol_segments, sockets)
 
     # Commit everything up to window_end.
     buf.last_transcribed_offset_bytes = window_end
@@ -327,7 +411,6 @@ async def _transcription_loop(state: ServerState) -> None:
         try:
             async with state.lock:
                 sessions = list(state.sessions.values())
-                socket_map = {k: set(v) for k, v in state.session_sockets.items()}
 
             for sess in sessions:
                 # Transcribe mic and system streams separately
@@ -343,8 +426,9 @@ async def _transcription_loop(state: ServerState) -> None:
                             min_new_audio_sec,
                             window_sec,
                             max_buffer_sec,
-                            socket_map,
                         )
+
+            await _flush_stale_utterances(state)
 
         except Exception:
             logger.exception("transcription loop error (continuing)")
@@ -352,7 +436,70 @@ async def _transcription_loop(state: ServerState) -> None:
         await asyncio.sleep(interval_sec)
 
 
-async def _handle_client(ws: WebSocketServerProtocol, state: ServerState) -> None:
+async def _flush_stale_utterances(state: ServerState) -> None:
+    sends: list[tuple[str, list[TranscriptSegment], set[ServerConnection]]] = []
+    async with state.lock:
+        now_sec = time.time()
+        for session_id, assembler in state.utterance_assemblers.items():
+            segments = [item.to_protocol() for item in assembler.flush_if_stale(now_sec)]
+            if segments:
+                sends.append((session_id, segments, set(state.session_sockets.get(session_id, set()))))
+
+    for session_id, segments, sockets in sends:
+        await _send_transcript_segments(state, session_id, segments, sockets)
+
+
+async def _handle_control_message(
+    ws: ServerConnection,
+    state: ServerState,
+    msg: Any,
+) -> None:
+    try:
+        control = _validate_control_message(msg)
+    except Exception as e:
+        session_id = msg.get("session_id", "unknown") if isinstance(msg, dict) else "unknown"
+        await ws.send(json.dumps(_error(session_id=session_id, code="bad_request", message=str(e))))
+        return
+
+    session_id = control["session_id"]
+    command = control["command"]
+    payload = control.get("payload", {})
+
+    if command == "metadata":
+        async with state.lock:
+            state.session_sockets.setdefault(session_id, set()).add(ws)
+            state.get_speaker_tracker(session_id).apply_metadata(payload)
+        return
+
+    if command == "speaker_activity":
+        async with state.lock:
+            state.session_sockets.setdefault(session_id, set()).add(ws)
+            state.get_speaker_tracker(session_id).apply_activity(payload)
+        return
+
+    if command == "stop":
+        async with state.lock:
+            state.session_sockets.setdefault(session_id, set()).add(ws)
+            assembler = state.utterance_assemblers.get(session_id)
+            segments = [item.to_protocol() for item in assembler.flush(reason="stop")] if assembler else []
+            sockets = set(state.session_sockets.get(session_id, set()))
+        await _send_transcript_segments(state, session_id, segments, sockets)
+        return
+
+    if command == "ping":
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "control",
+                    "session_id": session_id,
+                    "command": "pong",
+                    "payload": {},
+                }
+            )
+        )
+
+
+async def _handle_client(ws: ServerConnection, state: ServerState) -> None:
     peer = getattr(ws, "remote_address", None)
     logger.info("client connected: %s", peer)
 
@@ -447,6 +594,9 @@ async def _handle_client(ws: WebSocketServerProtocol, state: ServerState) -> Non
                     logger.info("audio_chunk: session=%s stream=%s seq=%d audio_base64_len=%d", session_id, stream_id, seq, audio_len)
                     last_log_at = now
 
+            elif msg_type == "control":
+                await _handle_control_message(ws, state, msg)
+
             else:
                 session_id = msg.get("session_id", "unknown") if isinstance(msg, dict) else "unknown"
                 await ws.send(
@@ -485,7 +635,7 @@ async def _run_server() -> None:
             await asyncio.Future()  # run forever
     finally:
         transcriber.cancel()
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(asyncio.CancelledError):
             await transcriber
 
 
@@ -494,7 +644,8 @@ def main() -> None:
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
     )
-    asyncio.run(_run_server())
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(_run_server())
 
 
 if __name__ == "__main__":
