@@ -52,6 +52,73 @@ def test_zoom_activity_labels_system_audio() -> None:
     assert speaker.speaker_confidence == 0.95
 
 
+def test_manual_activity_labels_system_audio_without_zoom_app() -> None:
+    tracker = SpeakerTracker(active_speaker_ttl_sec=30.0)
+
+    tracker.apply_activity(
+        {
+            "stream_id": "system",
+            "speaker_id": "manual:taylor",
+            "speaker_label": "Taylor",
+            "speaker_source": "manual",
+            "speaker_confidence": 0.8,
+            "start_timestamp_ms": 100_000,
+        }
+    )
+
+    speaker = tracker.resolve(stream_id="system", start_sec=101.0, end_sec=102.0)
+    assert speaker.speaker_id == "manual:taylor"
+    assert speaker.speaker_label == "Taylor"
+    assert speaker.speaker_source == "manual"
+    assert speaker.speaker_confidence == 0.8
+
+
+def test_manual_activity_persists_beyond_rtms_ttl() -> None:
+    tracker = SpeakerTracker(active_speaker_ttl_sec=5.0)
+
+    tracker.apply_activity(
+        {
+            "stream_id": "system",
+            "speaker_id": "manual:taylor",
+            "speaker_label": "Taylor",
+            "speaker_source": "manual",
+            "start_sec": 100.0,
+        }
+    )
+
+    speaker = tracker.resolve(stream_id="system", start_sec=140.0, end_sec=141.0)
+    assert speaker.speaker_label == "Taylor"
+    assert speaker.speaker_source == "manual"
+
+
+def test_manual_activity_takes_priority_over_diarization() -> None:
+    tracker = SpeakerTracker(active_speaker_ttl_sec=5.0)
+    tracker.apply_activity(
+        {
+            "stream_id": "system",
+            "speaker_id": "manual:taylor",
+            "speaker_label": "Taylor",
+            "speaker_source": "manual",
+            "start_sec": 100.0,
+        }
+    )
+    tracker.apply_activity(
+        {
+            "stream_id": "system",
+            "speaker_id": "diarization:SPEAKER_00",
+            "speaker_label": "Speaker 1",
+            "speaker_source": "diarization",
+            "start_sec": 120.0,
+            "end_sec": 125.0,
+        }
+    )
+
+    speaker = tracker.resolve(stream_id="system", start_sec=121.0, end_sec=122.0)
+    assert speaker.speaker_id == "manual:taylor"
+    assert speaker.speaker_label == "Taylor"
+    assert speaker.speaker_source == "manual"
+
+
 def test_stale_open_zoom_activity_falls_back_to_system_label() -> None:
     tracker = SpeakerTracker(system_label="Computer audio", active_speaker_ttl_sec=5.0)
     tracker.apply_activity({"participant_id": "p1", "participant_name": "Taylor", "start_sec": 10.0})

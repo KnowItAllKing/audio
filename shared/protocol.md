@@ -88,7 +88,7 @@ Control messages for lifecycle and metadata (reserved for later phases).
 
 - `metadata.payload.participants`: optional participant list for Zoom/RTMS-style speaker IDs.
 - `metadata.payload.stream_speakers`: optional fallback labels per audio source.
-- `speaker_activity.payload`: optional active-speaker interval, usually for `"system"` audio:
+- `speaker_activity.payload`: optional active-speaker interval, usually for `"system"` audio. RTMS bridges use `"speaker_source": "zoom"`; app-independent/manual labeling can use `"speaker_source": "manual"`:
 
 ```json
 {
@@ -98,6 +98,7 @@ Control messages for lifecycle and metadata (reserved for later phases).
   "payload": {
     "participant_id": "zoom-user-1",
     "participant_name": "Taylor",
+    "speaker_source": "zoom",
     "stream_id": "system",
     "start_timestamp_ms": 1730000000123,
     "end_timestamp_ms": 1730000002345

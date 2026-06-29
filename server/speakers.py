@@ -21,6 +21,8 @@ class SpeakerActivity:
     stream_id: StreamId
     start_sec: float
     end_sec: Optional[float]
+    speaker_source: SpeakerSource
+    speaker_confidence: float
 
 
 class SpeakerTracker:
@@ -139,6 +141,8 @@ class SpeakerTracker:
         end_sec = _read_time_sec(payload, "end")
         if end_sec is not None and end_sec < start_sec:
             end_sec = start_sec
+        source = _speaker_source(payload.get("speaker_source") or payload.get("source"), default="zoom")
+        confidence = _optional_float(payload.get("speaker_confidence") or payload.get("confidence"))
 
         self.activities.append(
             SpeakerActivity(
@@ -147,6 +151,8 @@ class SpeakerTracker:
                 stream_id=cast(StreamId, stream_id),
                 start_sec=start_sec,
                 end_sec=end_sec,
+                speaker_source=source,
+                speaker_confidence=_clamp_confidence(confidence if confidence is not None else 0.95),
             )
         )
         if len(self.activities) > 500:
@@ -155,11 +161,14 @@ class SpeakerTracker:
     def resolve(self, *, stream_id: StreamId, start_sec: float, end_sec: float) -> SpeakerIdentity:
         activity = self._activity_for(stream_id=stream_id, start_sec=start_sec, end_sec=end_sec)
         if activity:
+            speaker_id = activity.participant_id
+            if ":" not in speaker_id:
+                speaker_id = f"{activity.speaker_source}:{speaker_id}"
             return SpeakerIdentity(
-                speaker_id=f"zoom:{activity.participant_id}",
+                speaker_id=speaker_id,
                 speaker_label=activity.participant_label,
-                speaker_source="zoom",
-                speaker_confidence=0.95,
+                speaker_source=activity.speaker_source,
+                speaker_confidence=activity.speaker_confidence,
             )
         return self.stream_speakers[stream_id]
 
@@ -174,14 +183,23 @@ class SpeakerTracker:
             if activity.start_sec > mid_sec:
                 continue
             if activity.end_sec is None:
-                if mid_sec - activity.start_sec > self.active_speaker_ttl_sec:
+                ttl_sec = 3600.0 if activity.speaker_source == "manual" else self.active_speaker_ttl_sec
+                if mid_sec - activity.start_sec > ttl_sec:
                     continue
             elif activity.end_sec + 0.25 < mid_sec:
                 continue
             matches.append(activity)
         if not matches:
             return None
-        return max(matches, key=lambda item: item.start_sec)
+        return max(matches, key=lambda item: (_activity_priority(item), item.start_sec))
+
+
+def _activity_priority(activity: SpeakerActivity) -> int:
+    if activity.speaker_source in ("manual", "zoom"):
+        return 3
+    if activity.speaker_source == "diarization":
+        return 2
+    return 1
 
 
 def _read_time_sec(payload: dict[str, Any], prefix: Literal["start", "end"]) -> Optional[float]:

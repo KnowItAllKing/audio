@@ -1,6 +1,6 @@
 WHISPER_E2E_MODEL ?= tiny
 
-.PHONY: server-test client-test client-typecheck real-whisper-e2e real-whisper-hard-e2e security-audit verify
+.PHONY: server-test client-test client-typecheck real-whisper-e2e real-whisper-hard-e2e real-diarization security-audit verify
 
 server-test:
 	PYTHONPATH=. uv run --project server --extra dev pytest -q
@@ -17,8 +17,11 @@ real-whisper-e2e:
 real-whisper-hard-e2e:
 	RUN_REAL_WHISPER_HARD_E2E=1 WHISPER_E2E_MODEL=$(WHISPER_E2E_MODEL) PYTHONPATH=. uv run --project server --extra dev pytest server/tests/test_end_to_end_real_whisper.py::test_hard_end_to_end_real_whisper_cases -q -rx
 
+real-diarization:
+	set -a; [ ! -f server/.env ] || . server/.env; set +a; RUN_REAL_DIARIZATION=1 PYTHONPATH=. uv run --project server --extra dev --extra diarization pytest server/tests/test_real_diarization.py -q -rs
+
 security-audit:
 	pnpm audit --audit-level=moderate
-	uv audit --project server --locked
+	uv audit --project server --locked --no-extra diarization
 
 verify: server-test client-test client-typecheck security-audit

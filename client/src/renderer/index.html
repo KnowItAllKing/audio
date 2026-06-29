@@ -104,6 +104,20 @@
         border: 1px solid var(--border);
         background: rgba(255, 255, 255, 0.06);
       }
+      .meter {
+        height: 8px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.08);
+        flex: 1;
+      }
+      .meterFill {
+        width: 0%;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--good);
+        transition: width 80ms linear;
+      }
       .row {
         display: grid;
         grid-template-columns: 1fr 1fr 1fr;
@@ -141,6 +155,9 @@
       .pill.bad {
         color: var(--bad);
         border-color: rgba(251, 113, 133, 0.45);
+      }
+      .wide {
+        grid-column: 1 / -1;
       }
     </style>
   </head>
@@ -219,6 +236,43 @@
             <label for="micGateStatus">Mic gate status</label>
             <div class="inlineControl">
               <span id="micGateStatus" class="pill">idle</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="height: 12px"></div>
+
+        <div class="grid">
+          <div>
+            <label for="micLevelStatus">Mic level</label>
+            <div class="inlineControl">
+              <div class="meter"><div id="micMeterFill" class="meterFill"></div></div>
+              <span id="micLevelStatus" class="pill">idle</span>
+            </div>
+          </div>
+          <div>
+            <label for="sysLevelStatus">System level</label>
+            <div class="inlineControl">
+              <div class="meter"><div id="sysMeterFill" class="meterFill"></div></div>
+              <span id="sysLevelStatus" class="pill">idle</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="height: 12px"></div>
+
+        <div class="grid">
+          <div>
+            <label for="activeSpeakerLabel">Current Zoom speaker</label>
+            <input id="activeSpeakerLabel" type="text" placeholder="Name" />
+          </div>
+          <div>
+            <label for="activeSpeakerBtn">Speaker label</label>
+            <button id="activeSpeakerBtn" type="button">Set active speaker</button>
+          </div>
+          <div class="wide">
+            <div class="inlineControl">
+              <span id="activeSpeakerStatus" class="pill">idle</span>
             </div>
           </div>
         </div>

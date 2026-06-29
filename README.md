@@ -83,9 +83,40 @@ The protocol separates audio source tags from speaker identity:
 - `speaker_source`: `manual`, `stream`, `zoom`, `diarization`, or `unknown`
 
 Without Zoom metadata or diarization, mic defaults to `You` and system audio
-defaults to `System audio`. The Electron client sends editable local labels.
-Future Zoom RTMS events should be forwarded as `control:speaker_activity` so
-the server can map participant names onto system-audio transcript utterances.
+defaults to `System audio`. The Electron client sends editable local labels and
+can send manual current-speaker activity for app-independent Zoom mode.
+
+### Optional pyannote diarization
+
+Diarization is optional and heavy. It uses pyannote.audio Community-1 and labels
+mixed system audio as `Speaker 1`, `Speaker 2`, etc. Manual and Zoom speaker
+labels take priority over diarization labels.
+
+```bash
+uv sync --project server --extra dev --extra diarization
+
+DIARIZATION_BACKEND=pyannote \
+DIARIZATION_HF_TOKEN=<hugging-face-token> \
+DIARIZATION_DEVICE=cpu \
+DIARIZATION_STREAMS=system \
+PYTHONPATH=. uv run --project server --extra diarization python -m server.main
+```
+
+Useful knobs:
+
+- `DIARIZATION_MIN_SPEAKERS`
+- `DIARIZATION_MAX_SPEAKERS`
+- `DIARIZATION_MIN_TURN_SEC=0.2`
+- `DIARIZATION_STRICT=1` to fail server startup if diarization cannot load
+
+pyannote models may require accepting gated Hugging Face model terms for
+`pyannote/speaker-diarization-community-1`.
+
+Real diarization smoke test:
+
+```bash
+DIARIZATION_HF_TOKEN=<hugging-face-token> make real-diarization
+```
 
 ### Mock Zoom RTMS testing
 
@@ -158,6 +189,7 @@ The Electron app captures **mic** and a user-selected **“system”** device (t
 The mic path has a mute button plus a client-side RMS gate, so quiet room noise
 is dropped before it reaches Whisper. A pause finalizes the current phrase even
 when the client stops sending silence.
+For Zoom without a Zoom app, use [Local Zoom Mode](shared/local-zoom-mode.md).
 
 ```bash
 pnpm install

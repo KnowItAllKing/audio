@@ -14,6 +14,7 @@ import numpy as np
 import websockets
 from websockets import ServerConnection
 
+from .diarization import DiarizationBackend, DiarizationTurn, create_diarization_backend, should_diarize_stream
 from .protocol_types import (
     AudioChunkMessage,
     ControlMessage,
@@ -238,6 +239,7 @@ class ServerState:
         self.sessions: dict[str, SessionState] = {}
         self.session_sockets: dict[str, set[ServerConnection]] = {}
         self.backend: WhisperBackend = create_backend()
+        self.diarizer: DiarizationBackend | None = create_diarization_backend()
         self.utterance_config = UtteranceAssemblerConfig(
             pause_sec=_env_float("UTTERANCE_PAUSE_SEC", 1.2),
             max_duration_sec=_env_float("UTTERANCE_MAX_SEC", 14.0),
@@ -303,6 +305,34 @@ def _assemble_transcript_segments(
             )
         )
     return out
+
+
+def _apply_diarization_turns(
+    state: ServerState,
+    session: SessionState,
+    stream_id: StreamId,
+    turns: list[DiarizationTurn],
+    base_offset_sec: float,
+    buf: StreamBuffer,
+) -> None:
+    if not turns:
+        return
+    epoch_sec = (buf.first_timestamp_ms / 1000.0) if buf.first_timestamp_ms else 0.0
+    tracker = state.get_speaker_tracker(session.session_id)
+    for turn in turns:
+        start_sec = float(epoch_sec + base_offset_sec + turn.start_sec)
+        end_sec = float(epoch_sec + base_offset_sec + turn.end_sec)
+        tracker.apply_activity(
+            {
+                "stream_id": stream_id,
+                "speaker_id": turn.speaker_id,
+                "speaker_label": turn.speaker_label,
+                "speaker_source": "diarization",
+                "speaker_confidence": turn.speaker_confidence,
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+            }
+        )
 
 
 async def _send_transcript_segments(
@@ -386,13 +416,24 @@ async def _transcribe_stream(
         buf.last_transcribed_offset_bytes = window_end
         return
 
+    diarization_task: asyncio.Task[list[DiarizationTurn]] | None = None
+    if state.diarizer is not None and should_diarize_stream(stream_id):
+        diarization_task = asyncio.create_task(asyncio.to_thread(state.diarizer.diarize, samples, sess.sample_rate_hz))
+
     # Avoid blocking the event loop.
     segments = await asyncio.to_thread(state.backend.transcribe, samples, sess.sample_rate_hz)
+    diarization_turns: list[DiarizationTurn] = []
+    if diarization_task is not None:
+        try:
+            diarization_turns = await diarization_task
+        except Exception:
+            logger.exception("diarization failed for session=%s stream=%s", sess.session_id, stream_id)
 
     protocol_segments: list[TranscriptSegment] = []
     sockets: set[ServerConnection] = set()
     if segments:
         async with state.lock:
+            _apply_diarization_turns(state, sess, stream_id, diarization_turns, base_offset_sec, buf)
             protocol_segments = _assemble_transcript_segments(state, sess, stream_id, segments, base_offset_sec, buf)
             sockets = set(state.session_sockets.get(sess.session_id, set()))
     await _send_transcript_segments(state, sess.session_id, protocol_segments, sockets)

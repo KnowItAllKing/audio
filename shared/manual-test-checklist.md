@@ -15,6 +15,7 @@
 - [ ] **Select devices**
   - [ ] Choose a **Mic device**
   - [ ] Optionally choose a **System device** (virtual loopback input)
+  - [ ] Confirm likely loopback devices auto-select as **System device**
   - [ ] Click **Refresh devices** if labels are missing
 
 - [ ] **Connect & Start**
@@ -22,9 +23,14 @@
   - [ ] Click **Connect & Start**
   - [ ] Confirm connection status shows **Connected**
   - [ ] Speak into mic and confirm transcript updates approximate spoken content
+  - [ ] Confirm **Mic level** moves while speaking
+  - [ ] Play meeting/system audio and confirm **System level** moves
   - [ ] Stop speaking and confirm mic gate status changes to **noise** with no new mic sends
   - [ ] Click **Mute mic** and confirm mic sends stop
   - [ ] Click **Unmute mic** and confirm mic sends resume when speaking
+  - [ ] Type a name in **Current Zoom speaker**
+  - [ ] Click **Set active speaker**
+  - [ ] Confirm new `[system]` transcript lines use that speaker label
 
 - [ ] **Stop + Save transcript**
   - [ ] Click **Stop**

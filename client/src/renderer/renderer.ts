@@ -1,5 +1,10 @@
 import { AudioStreamSender, type StreamId } from "./audio/AudioStreamSender";
-import { MicInputFilter, type MicInputFilterDecision } from "./audio/MicInputFilter";
+import {
+  chooseLikelyLoopbackDevice,
+  chooseLikelyMicDevice,
+  speakerIdFromLabel
+} from "./audio/LoopbackDevice";
+import { MicInputFilter, getAudioStats, type MicInputFilterDecision } from "./audio/MicInputFilter";
 
 type TranscriptSegment = {
   id: string;
@@ -47,10 +52,17 @@ const micSelect = $<HTMLSelectElement>("micSelect");
 const sysSelect = $<HTMLSelectElement>("sysSelect");
 const micLabelInput = $<HTMLInputElement>("micLabel");
 const sysLabelInput = $<HTMLInputElement>("sysLabel");
+const activeSpeakerLabelInput = $<HTMLInputElement>("activeSpeakerLabel");
+const activeSpeakerBtn = $<HTMLButtonElement>("activeSpeakerBtn");
+const activeSpeakerStatusEl = $<HTMLSpanElement>("activeSpeakerStatus");
 const micMuteBtn = $<HTMLButtonElement>("micMuteBtn");
 const micFilterEnabledInput = $<HTMLInputElement>("micFilterEnabled");
 const micGateThresholdInput = $<HTMLInputElement>("micGateThreshold");
 const micGateStatusEl = $<HTMLSpanElement>("micGateStatus");
+const micLevelStatusEl = $<HTMLSpanElement>("micLevelStatus");
+const sysLevelStatusEl = $<HTMLSpanElement>("sysLevelStatus");
+const micMeterFillEl = $<HTMLDivElement>("micMeterFill");
+const sysMeterFillEl = $<HTMLDivElement>("sysMeterFill");
 const refreshBtn = $<HTMLButtonElement>("refreshBtn");
 const startBtn = $<HTMLButtonElement>("startBtn");
 const stopBtn = $<HTMLButtonElement>("stopBtn");
@@ -129,6 +141,34 @@ function updateMicGateStatus(decision: MicInputFilterDecision | null = micLastDe
   micGateStatusEl.classList.toggle("bad", decision.reason === "muted");
 }
 
+function updateLevelStatus(
+  streamId: StreamId,
+  stats: { rms: number; peak: number } | null
+): void {
+  const statusEl = streamId === "mic" ? micLevelStatusEl : sysLevelStatusEl;
+  const fillEl = streamId === "mic" ? micMeterFillEl : sysMeterFillEl;
+  if (!stats) {
+    statusEl.textContent = "idle";
+    statusEl.classList.remove("good", "bad");
+    fillEl.style.width = "0%";
+    return;
+  }
+
+  const percent = Math.min(100, Math.round(stats.peak * 160));
+  fillEl.style.width = `${percent}%`;
+
+  if (stats.peak >= 0.98) {
+    statusEl.textContent = `clip peak=${stats.peak.toFixed(2)}`;
+    statusEl.classList.remove("good");
+    statusEl.classList.add("bad");
+    return;
+  }
+
+  statusEl.textContent = `rms=${stats.rms.toFixed(3)} peak=${stats.peak.toFixed(2)}`;
+  statusEl.classList.toggle("good", stats.rms >= 0.006);
+  statusEl.classList.remove("bad");
+}
+
 type CaptureHandle = {
   streamId: StreamId;
   mediaStream: MediaStream;
@@ -185,6 +225,32 @@ function sendSpeakerMetadata(): void {
   });
 }
 
+function sendActiveSpeakerOverride(): void {
+  const label = activeSpeakerLabelInput.value.trim();
+  if (!label) {
+    activeSpeakerStatusEl.textContent = "idle";
+    activeSpeakerStatusEl.classList.remove("good", "bad");
+    return;
+  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    activeSpeakerStatusEl.textContent = "not connected";
+    activeSpeakerStatusEl.classList.add("bad");
+    activeSpeakerStatusEl.classList.remove("good");
+    return;
+  }
+  sendControl("speaker_activity", {
+    stream_id: "system",
+    speaker_id: speakerIdFromLabel(label),
+    speaker_label: label,
+    speaker_source: "manual",
+    speaker_confidence: 0.8,
+    start_timestamp_ms: Date.now()
+  });
+  activeSpeakerStatusEl.textContent = label;
+  activeSpeakerStatusEl.classList.add("good");
+  activeSpeakerStatusEl.classList.remove("bad");
+}
+
 function updateSentStats(): void {
   sentStatsEl.textContent = `mic=${micSender?.getSentCount() ?? 0} sys=${sysSender?.getSentCount() ?? 0}`;
 }
@@ -206,6 +272,7 @@ function pushMicInput(input: Float32Array): void {
   });
   micLastDecision = decision;
   updateMicGateStatus(decision);
+  updateLevelStatus("mic", decision);
 
   if (!decision.shouldSend) return;
 
@@ -215,6 +282,7 @@ function pushMicInput(input: Float32Array): void {
 }
 
 function pushSystemInput(input: Float32Array): void {
+  updateLevelStatus("system", getAudioStats(input));
   const pcm = floatToPcmS16leMono(input);
   sysSender?.pushPcmBytes(new Uint8Array(pcm.buffer));
   updateSentStats();
@@ -273,8 +341,20 @@ async function refreshDevices(): Promise<void> {
   fillSelect(micSelect);
   fillSelect(sysSelect);
 
-  if (prevMic) micSelect.value = prevMic;
-  if (prevSys) sysSelect.value = prevSys;
+  const loopback = chooseLikelyLoopbackDevice(inputs);
+  const mic = chooseLikelyMicDevice(inputs, loopback?.deviceId);
+
+  if (prevMic) {
+    micSelect.value = prevMic;
+  } else if (mic) {
+    micSelect.value = mic.deviceId;
+  }
+
+  if (prevSys) {
+    sysSelect.value = prevSys;
+  } else if (loopback) {
+    sysSelect.value = loopback.deviceId;
+  }
 }
 
 async function startCaptureForDevice(
@@ -338,8 +418,12 @@ async function start(): Promise<void> {
   micLastDecision = null;
   sentStatsEl.textContent = "mic=0 sys=0";
   updateMicGateStatus(null);
+  updateLevelStatus("mic", null);
+  updateLevelStatus("system", null);
   recvStatsEl.textContent = "0";
   transcriptEl.textContent = "";
+  activeSpeakerStatusEl.textContent = "idle";
+  activeSpeakerStatusEl.classList.remove("good", "bad");
   setLastUpdate(null);
 
   startedAt = Date.now();
@@ -526,6 +610,10 @@ micFilterEnabledInput.addEventListener("change", () => {
 micGateThresholdInput.addEventListener("input", () => {
   micInputFilter.reset();
   updateMicGateStatus(null);
+});
+activeSpeakerBtn.addEventListener("click", () => sendActiveSpeakerOverride());
+activeSpeakerLabelInput.addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") sendActiveSpeakerOverride();
 });
 
 // Initial state

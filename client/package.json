@@ -8,7 +8,7 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "dev:test-client": "tsx src/testClient.ts",
-    "test:audio-filter": "tsx src/renderer/audio/MicInputFilter.spec.ts"
+    "test:audio-filter": "tsx src/renderer/audio/runAudioSpecs.ts"
   },
   "devDependencies": {
     "@types/node": "^24.13.2",
