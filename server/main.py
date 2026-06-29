@@ -25,6 +25,12 @@ from .protocol_types import (
     TranscriptUpdateMessage,
 )
 from .session_state import SessionState, StreamBuffer
+from .speaker_memory import (
+    SpeakerMemory,
+    SpeakerReviewStore,
+    clip_by_time,
+    create_speaker_memory,
+)
 from .speakers import SpeakerTracker
 from .transcription import bytes_per_second, compute_window, eligible_for_transcription
 from .utterances import UtteranceAssembler, UtteranceAssemblerConfig
@@ -226,7 +232,17 @@ def _validate_control_message(obj: Any) -> ControlMessage:
         raise ValueError("session_id must be a non-empty string")
 
     command = obj.get("command")
-    if command not in ("start", "stop", "ping", "pong", "metadata", "speaker_activity"):
+    if command not in (
+        "start",
+        "stop",
+        "ping",
+        "pong",
+        "metadata",
+        "speaker_activity",
+        "speaker_memory_review",
+        "speaker_memory_enroll",
+        "speaker_memory_profiles",
+    ):
         raise ValueError("unsupported control command")
 
     payload = obj.get("payload")
@@ -260,6 +276,11 @@ class ServerState:
         self.session_sockets: dict[str, set[ServerConnection]] = {}
         self.backend: WhisperBackend = create_backend()
         self.diarizer: DiarizationBackend | None = create_diarization_backend()
+        self.speaker_memory: SpeakerMemory | None = create_speaker_memory()
+        self.speaker_review = SpeakerReviewStore(
+            min_duration_sec=_env_float("SPEAKER_MEMORY_MIN_CLIP_SEC", 0.5),
+            max_duration_sec=_env_float("SPEAKER_MEMORY_MAX_CLIP_SEC", 6.0),
+        )
         self.utterance_config = UtteranceAssemblerConfig(
             pause_sec=_env_float("UTTERANCE_PAUSE_SEC", 1.2),
             max_duration_sec=_env_float("UTTERANCE_MAX_SEC", 14.0),
@@ -334,6 +355,8 @@ def _apply_diarization_turns(
     turns: list[DiarizationTurn],
     base_offset_sec: float,
     buf: StreamBuffer,
+    samples: np.ndarray,
+    sample_rate_hz: int,
 ) -> None:
     if not turns:
         return
@@ -342,13 +365,44 @@ def _apply_diarization_turns(
     for turn in turns:
         start_sec = float(epoch_sec + base_offset_sec + turn.start_sec)
         end_sec = float(epoch_sec + base_offset_sec + turn.end_sec)
+        speaker_id = turn.speaker_id
+        speaker_label = turn.speaker_label
+        speaker_source = "diarization"
+        speaker_confidence = turn.speaker_confidence
+        match = None
+
+        if state.speaker_memory is not None:
+            clip = clip_by_time(
+                samples,
+                sample_rate_hz,
+                turn.start_sec,
+                turn.end_sec,
+                max_duration_sec=_env_float("SPEAKER_MEMORY_MAX_CLIP_SEC", 6.0),
+            )
+            match = state.speaker_memory.match(samples=clip, sample_rate_hz=sample_rate_hz)
+            if match is not None:
+                speaker_id = f"memory:{match.profile.profile_id}"
+                speaker_label = match.profile.name
+                speaker_source = "memory"
+                speaker_confidence = match.confidence
+
+        state.speaker_review.observe(
+            session_id=session.session_id,
+            stream_id=stream_id,
+            turn=turn,
+            absolute_start_sec=start_sec,
+            absolute_end_sec=end_sec,
+            samples=samples,
+            sample_rate_hz=sample_rate_hz,
+            match=match,
+        )
         tracker.apply_activity(
             {
                 "stream_id": stream_id,
-                "speaker_id": turn.speaker_id,
-                "speaker_label": turn.speaker_label,
-                "speaker_source": "diarization",
-                "speaker_confidence": turn.speaker_confidence,
+                "speaker_id": speaker_id,
+                "speaker_label": speaker_label,
+                "speaker_source": speaker_source,
+                "speaker_confidence": speaker_confidence,
                 "start_sec": start_sec,
                 "end_sec": end_sec,
             }
@@ -377,6 +431,118 @@ async def _send_transcript_segments(
             if sset:
                 for ws in dead:
                     sset.discard(ws)
+
+
+async def _send_speaker_memory_review(
+    ws: ServerConnection,
+    state: ServerState,
+    session_id: str,
+) -> None:
+    async with state.lock:
+        samples = [sample.to_protocol() for sample in state.speaker_review.samples_for_session(session_id)]
+    await ws.send(
+        json.dumps(
+            {
+                "type": "speaker_memory_review",
+                "session_id": session_id,
+                "samples": samples,
+            }
+        )
+    )
+
+
+async def _send_speaker_memory_profiles(
+    ws: ServerConnection,
+    state: ServerState,
+    session_id: str,
+) -> None:
+    async with state.lock:
+        profiles = state.speaker_memory.profiles() if state.speaker_memory is not None else []
+    await ws.send(
+        json.dumps(
+            {
+                "type": "speaker_memory_profiles",
+                "session_id": session_id,
+                "profiles": [profile.to_protocol() for profile in profiles],
+            }
+        )
+    )
+
+
+async def _handle_speaker_memory_profiles(
+    ws: ServerConnection,
+    state: ServerState,
+    session_id: str,
+    payload: dict[str, Any],
+) -> None:
+    profiles_payload = payload.get("profiles")
+    if state.speaker_memory is not None and isinstance(profiles_payload, list):
+        async with state.lock:
+            state.speaker_memory.replace_profiles(profiles_payload)
+    await _send_speaker_memory_profiles(ws, state, session_id)
+
+
+async def _handle_speaker_memory_enroll(
+    ws: ServerConnection,
+    state: ServerState,
+    session_id: str,
+    payload: dict[str, Any],
+) -> None:
+    if state.speaker_memory is None:
+        await ws.send(
+            json.dumps(
+                _error(
+                    session_id=session_id,
+                    code="speaker_memory_disabled",
+                    message="speaker memory is disabled",
+                )
+            )
+        )
+        return
+
+    sample_id = payload.get("sample_id")
+    name = payload.get("name")
+    if not isinstance(sample_id, str) or not sample_id:
+        await ws.send(json.dumps(_error(session_id=session_id, code="bad_request", message="sample_id is required")))
+        return
+    if not isinstance(name, str) or not name.strip():
+        await ws.send(json.dumps(_error(session_id=session_id, code="bad_request", message="name is required")))
+        return
+
+    async with state.lock:
+        sample = state.speaker_review.get(sample_id)
+    if sample is None or sample.session_id != session_id:
+        await ws.send(
+            json.dumps(
+                _error(
+                    session_id=session_id,
+                    code="sample_not_found",
+                    message="speaker review sample was not found",
+                )
+            )
+        )
+        return
+
+    try:
+        profile = state.speaker_memory.enroll(name=name, samples=sample.samples, sample_rate_hz=sample.sample_rate_hz)
+    except Exception as e:
+        await ws.send(json.dumps(_error(session_id=session_id, code="speaker_enroll_failed", message=str(e))))
+        return
+
+    async with state.lock:
+        state.speaker_review.mark_enrolled(sample_id, profile)
+
+    await ws.send(
+        json.dumps(
+            {
+                "type": "speaker_memory_profile",
+                "session_id": session_id,
+                "profile": profile.to_protocol(),
+                "profiles": [item.to_protocol() for item in state.speaker_memory.profiles()],
+            }
+        )
+    )
+    await _send_speaker_memory_review(ws, state, session_id)
 
 
 async def _transcribe_stream(
@@ -453,7 +619,16 @@ async def _transcribe_stream(
     sockets: set[ServerConnection] = set()
     if segments:
         async with state.lock:
-            _apply_diarization_turns(state, sess, stream_id, diarization_turns, base_offset_sec, buf)
+            _apply_diarization_turns(
+                state,
+                sess,
+                stream_id,
+                diarization_turns,
+                base_offset_sec,
+                buf,
+                samples,
+                sess.sample_rate_hz,
+            )
             protocol_segments = _assemble_transcript_segments(state, sess, stream_id, segments, base_offset_sec, buf)
             sockets = set(state.session_sockets.get(sess.session_id, set()))
     await _send_transcript_segments(state, sess.session_id, protocol_segments, sockets)
@@ -545,6 +720,21 @@ async def _handle_control_message(
             segments = [item.to_protocol() for item in assembler.flush(reason="stop")] if assembler else []
             sockets = set(state.session_sockets.get(session_id, set()))
         await _send_transcript_segments(state, session_id, segments, sockets)
+        await _send_speaker_memory_review(ws, state, session_id)
+        return
+
+    if command == "speaker_memory_review":
+        async with state.lock:
+            state.session_sockets.setdefault(session_id, set()).add(ws)
+        await _send_speaker_memory_review(ws, state, session_id)
+        return
+
+    if command == "speaker_memory_profiles":
+        await _handle_speaker_memory_profiles(ws, state, session_id, payload)
+        return
+
+    if command == "speaker_memory_enroll":
+        await _handle_speaker_memory_enroll(ws, state, session_id, payload)
         return
 
     if command == "ping":

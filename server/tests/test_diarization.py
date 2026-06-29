@@ -3,11 +3,14 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+import numpy as np
+
 from server import diarization as diarization_module
 from server.diarization import DiarizationTurn, _turns_from_pyannote_annotation, create_diarization_backend
 from server.main import _load_dotenv
 from server.main import _apply_diarization_turns
 from server.session_state import SessionState, StreamBuffer
+from server.speaker_memory import SpeakerMatch, SpeakerProfile, SpeakerReviewStore
 from server.speakers import SpeakerTracker
 
 
@@ -23,6 +26,8 @@ class _FakeDataFrame:
 class _FakeState:
     def __init__(self) -> None:
         self.trackers: dict[str, SpeakerTracker] = {}
+        self.speaker_memory = None
+        self.speaker_review = SpeakerReviewStore()
 
     def get_speaker_tracker(self, session_id: str) -> SpeakerTracker:
         tracker = self.trackers.get(session_id)
@@ -142,6 +147,8 @@ def test_apply_diarization_turns_anchors_to_client_timestamps() -> None:
         ],
         base_offset_sec=10.0,
         buf=buf,
+        samples=np.zeros(16_000 * 3, dtype=np.float32),
+        sample_rate_hz=16_000,
     )
 
     speaker = state.get_speaker_tracker("diarization-session").resolve(
@@ -153,3 +160,53 @@ def test_apply_diarization_turns_anchors_to_client_timestamps() -> None:
     assert speaker.speaker_label == "Speaker 1"
     assert speaker.speaker_source == "diarization"
     assert speaker.speaker_confidence == 0.7
+
+
+def test_apply_diarization_turns_uses_speaker_memory_match() -> None:
+    class FakeMemory:
+        def match(self, **kwargs):
+            return SpeakerMatch(
+                profile=SpeakerProfile(
+                    profile_id="alice-profile",
+                    name="Alice",
+                    embedding=np.ones(4, dtype=np.float32),
+                    sample_count=1,
+                    created_at=1.0,
+                    updated_at=1.0,
+                ),
+                confidence=0.91,
+            )
+
+    state = _FakeState()
+    state.speaker_memory = FakeMemory()
+    session = SessionState(session_id="memory-session")
+    buf = StreamBuffer(stream_id="system", first_timestamp_ms=200_000)
+
+    _apply_diarization_turns(
+        state,
+        session,
+        "system",
+        [
+            DiarizationTurn(
+                start_sec=0.0,
+                end_sec=1.2,
+                speaker_id="diarization:SPEAKER_00",
+                speaker_label="Speaker 1",
+                speaker_confidence=0.7,
+            )
+        ],
+        base_offset_sec=0.0,
+        buf=buf,
+        samples=np.full(16_000 * 2, 0.1, dtype=np.float32),
+        sample_rate_hz=16_000,
+    )
+
+    speaker = state.get_speaker_tracker("memory-session").resolve(
+        stream_id="system",
+        start_sec=200.3,
+        end_sec=200.6,
+    )
+    assert speaker.speaker_id == "memory:alice-profile"
+    assert speaker.speaker_label == "Alice"
+    assert speaker.speaker_source == "memory"
+    assert speaker.speaker_confidence == 0.91

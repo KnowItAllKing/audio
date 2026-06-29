@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 from typing import Literal, TypedDict, Union
-
-
 from typing_extensions import NotRequired
 
 
 StreamId = Literal["mic", "system"]
-SpeakerSource = Literal["stream", "zoom", "diarization", "manual", "unknown"]
+SpeakerSource = Literal["stream", "zoom", "diarization", "memory", "manual", "unknown"]
 
 
 class AudioFormat(TypedDict):
@@ -29,7 +27,17 @@ class AudioChunkMessage(TypedDict):
 class ControlMessage(TypedDict):
     type: Literal["control"]
     session_id: str
-    command: Literal["start", "stop", "ping", "pong", "metadata", "speaker_activity"]
+    command: Literal[
+        "start",
+        "stop",
+        "ping",
+        "pong",
+        "metadata",
+        "speaker_activity",
+        "speaker_memory_review",
+        "speaker_memory_enroll",
+        "speaker_memory_profiles",
+    ]
     payload: NotRequired[dict]
 
 
@@ -54,6 +62,49 @@ class TranscriptUpdateMessage(TypedDict):
     segments: list[TranscriptSegment]
 
 
+class SpeakerMemoryReviewSample(TypedDict):
+    sample_id: str
+    speaker_id: str
+    speaker_label: str
+    stream_id: StreamId
+    start_sec: float
+    end_sec: float
+    duration_sec: float
+    sample_rate_hz: int
+    audio_wav_base64: str
+    matched_profile_id: NotRequired[str | None]
+    matched_name: NotRequired[str | None]
+    match_confidence: NotRequired[float | None]
+
+
+class SpeakerMemoryReviewMessage(TypedDict):
+    type: Literal["speaker_memory_review"]
+    session_id: str
+    samples: list[SpeakerMemoryReviewSample]
+
+
+class SpeakerMemoryProfile(TypedDict):
+    profile_id: str
+    name: str
+    fingerprint: list[float]
+    sample_count: int
+    created_at: float
+    updated_at: float
+
+
+class SpeakerMemoryProfileMessage(TypedDict):
+    type: Literal["speaker_memory_profile"]
+    session_id: str
+    profile: SpeakerMemoryProfile
+    profiles: list[SpeakerMemoryProfile]
+
+
+class SpeakerMemoryProfilesMessage(TypedDict):
+    type: Literal["speaker_memory_profiles"]
+    session_id: str
+    profiles: list[SpeakerMemoryProfile]
+
+
 class ErrorMessage(TypedDict):
     type: Literal["error"]
     session_id: str
@@ -61,4 +112,12 @@ class ErrorMessage(TypedDict):
     message: str
 
 
-BaseMessage = Union[AudioChunkMessage, ControlMessage, TranscriptUpdateMessage, ErrorMessage]
+BaseMessage = Union[
+    AudioChunkMessage,
+    ControlMessage,
+    TranscriptUpdateMessage,
+    SpeakerMemoryReviewMessage,
+    SpeakerMemoryProfileMessage,
+    SpeakerMemoryProfilesMessage,
+    ErrorMessage,
+]

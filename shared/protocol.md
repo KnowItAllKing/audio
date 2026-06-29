@@ -81,7 +81,7 @@ Control messages for lifecycle and metadata (reserved for later phases).
 
 - `type`: `"control"`
 - `session_id`: string UUID
-- `command`: `"start"` | `"stop"` | `"ping"` | `"pong"` | `"metadata"` | `"speaker_activity"`
+- `command`: `"start"` | `"stop"` | `"ping"` | `"pong"` | `"metadata"` | `"speaker_activity"` | `"speaker_memory_review"` | `"speaker_memory_enroll"` | `"speaker_memory_profiles"`
 - `payload`: optional object (command-specific)
 
 #### Speaker metadata
@@ -102,6 +102,58 @@ Control messages for lifecycle and metadata (reserved for later phases).
     "stream_id": "system",
     "start_timestamp_ms": 1730000000123,
     "end_timestamp_ms": 1730000002345
+  }
+}
+```
+
+#### Speaker memory controls
+
+After diarization has produced review clips, the client can ask for temporary
+speaker-memory samples:
+
+```json
+{
+  "type": "control",
+  "session_id": "1b0d8f1e-2e8c-4e5f-baf5-0c0f4d1d5c3b",
+  "command": "speaker_memory_review",
+  "payload": {}
+}
+```
+
+To enroll a review clip under a local name:
+
+```json
+{
+  "type": "control",
+  "session_id": "1b0d8f1e-2e8c-4e5f-baf5-0c0f4d1d5c3b",
+  "command": "speaker_memory_enroll",
+  "payload": {
+    "sample_id": "review-abc123",
+    "name": "Taylor"
+  }
+}
+```
+
+At connection/session start, the client can sync its saved speaker fingerprints
+into the server's in-memory matcher. The server does not persist these
+fingerprints:
+
+```json
+{
+  "type": "control",
+  "session_id": "1b0d8f1e-2e8c-4e5f-baf5-0c0f4d1d5c3b",
+  "command": "speaker_memory_profiles",
+  "payload": {
+    "profiles": [
+      {
+        "profile_id": "taylor-abc123",
+        "name": "Taylor",
+        "fingerprint": [0.12, -0.03, 0.44],
+        "sample_count": 1,
+        "created_at": 1730000000.0,
+        "updated_at": 1730000000.0
+      }
+    ]
   }
 }
 ```
@@ -146,7 +198,7 @@ Incremental transcript updates. The client should treat these as **append/replac
 - `stream_tags`: array of `"mic"` | `"system"` (may contain one or both)
 - `speaker_id`: stable speaker ID when available
 - `speaker_label`: display label such as `"You"` or a Zoom participant name
-- `speaker_source`: `"stream"` | `"zoom"` | `"diarization"` | `"manual"` | `"unknown"`
+- `speaker_source`: `"stream"` | `"zoom"` | `"diarization"` | `"memory"` | `"manual"` | `"unknown"`
 - `speaker_confidence`: number from `0.0` to `1.0`
 - `is_final`: boolean
   - `false` = partial/intermediate hypothesis
@@ -155,6 +207,87 @@ Incremental transcript updates. The client should treat these as **append/replac
 - `final_reason`: optional string, e.g. `"punctuation"`, `"pause"`, `"speaker_change"`, `"max_duration"`, `"stop"`
 
 ### `error`
+
+### `speaker_memory_review`
+
+Speaker-memory review samples. Audio clips are temporary review clips selected
+from diarized system audio. They are sent as WAV data for local playback; raw
+clips are not persisted by the server.
+
+```json
+{
+  "type": "speaker_memory_review",
+  "session_id": "1b0d8f1e-2e8c-4e5f-baf5-0c0f4d1d5c3b",
+  "samples": [
+    {
+      "sample_id": "review-abc123",
+      "speaker_id": "diarization:SPEAKER_00",
+      "speaker_label": "Speaker 1",
+      "stream_id": "system",
+      "start_sec": 1730000000.1,
+      "end_sec": 1730000002.4,
+      "duration_sec": 2.3,
+      "sample_rate_hz": 16000,
+      "audio_wav_base64": "UklGRi...",
+      "matched_profile_id": null,
+      "matched_name": null,
+      "match_confidence": null
+    }
+  ]
+}
+```
+
+### `speaker_memory_profile`
+
+Sent after enrolling a review sample under a name. The client should persist
+the returned profiles locally and sync them back on the next connection.
+
+```json
+{
+  "type": "speaker_memory_profile",
+  "session_id": "1b0d8f1e-2e8c-4e5f-baf5-0c0f4d1d5c3b",
+  "profile": {
+    "profile_id": "taylor-abc123",
+    "name": "Taylor",
+    "fingerprint": [0.12, -0.03, 0.44],
+    "sample_count": 1,
+    "created_at": 1730000000.0,
+    "updated_at": 1730000000.0
+  },
+  "profiles": [
+    {
+      "profile_id": "taylor-abc123",
+      "name": "Taylor",
+      "fingerprint": [0.12, -0.03, 0.44],
+      "sample_count": 1,
+      "created_at": 1730000000.0,
+      "updated_at": 1730000000.0
+    }
+  ]
+}
+```
+
+### `speaker_memory_profiles`
+
+Sent after syncing client-owned fingerprints into the server's in-memory
+matcher.
+
+```json
+{
+  "type": "speaker_memory_profiles",
+  "session_id": "1b0d8f1e-2e8c-4e5f-baf5-0c0f4d1d5c3b",
+  "profiles": [
+    {
+      "profile_id": "taylor-abc123",
+      "name": "Taylor",
+      "fingerprint": [0.12, -0.03, 0.44],
+      "sample_count": 1,
+      "created_at": 1730000000.0,
+      "updated_at": 1730000000.0
+    }
+  ]
+}
+```
 
 Structured error message.
 

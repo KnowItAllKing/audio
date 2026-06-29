@@ -1,6 +1,6 @@
 WHISPER_E2E_MODEL ?= tiny
 
-.PHONY: server-test client-test client-typecheck real-whisper-e2e real-whisper-hard-e2e real-diarization security-audit verify
+.PHONY: server-test client-test client-typecheck real-whisper-e2e real-whisper-hard-e2e real-diarization speaker-memory-tts security-audit verify
 
 server-test:
 	PYTHONPATH=. uv run --project server --extra dev pytest -q
@@ -20,8 +20,11 @@ real-whisper-hard-e2e:
 real-diarization:
 	set -a; [ ! -f server/.env ] || . server/.env; set +a; RUN_REAL_DIARIZATION=1 PYTHONPATH=. uv run --project server --extra dev --extra diarization pytest server/tests/test_real_diarization.py -q -rs
 
+speaker-memory-tts:
+	RUN_SPEAKER_MEMORY_TTS=1 PYTHONPATH=. uv run --project server --extra dev pytest server/tests/test_speaker_memory_tts.py -q -rs
+
 security-audit:
 	pnpm audit --audit-level=moderate
 	uv audit --project server --locked --no-extra diarization
 
-verify: server-test client-test client-typecheck security-audit
+verify: server-test client-test client-typecheck

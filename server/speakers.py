@@ -197,8 +197,10 @@ class SpeakerTracker:
 def _activity_priority(activity: SpeakerActivity) -> int:
     if activity.speaker_source in ("manual", "zoom"):
         return 3
-    if activity.speaker_source == "diarization":
+    if activity.speaker_source == "memory":
         return 2
+    if activity.speaker_source == "diarization":
+        return 1
     return 1
 
 
@@ -235,7 +237,7 @@ def _optional_float(value: Any) -> Optional[float]:
 
 
 def _speaker_source(value: Any, *, default: SpeakerSource) -> SpeakerSource:
-    if value in ("stream", "zoom", "diarization", "manual", "unknown"):
+    if value in ("stream", "zoom", "diarization", "memory", "manual", "unknown"):
         return cast(SpeakerSource, value)
     return default
 

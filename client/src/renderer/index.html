@@ -509,6 +509,44 @@
         gap: 12px;
       }
 
+      .memoryList {
+        display: grid;
+        gap: 10px;
+        margin-top: 12px;
+      }
+
+      .memorySample {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+        padding: 12px;
+      }
+
+      .memorySampleHead {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        color: var(--text-soft);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .memorySample audio {
+        width: 100%;
+        margin-top: 9px;
+      }
+
+      .memoryEnroll {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+        margin-top: 9px;
+      }
+
+      .memoryEnroll .actionButton {
+        min-width: 86px;
+      }
+
       .mainPane {
         min-height: 0;
         display: flex;
@@ -876,7 +914,6 @@
     </style>
   </head>
   <body>
-    <input id="wsUrl" type="hidden" value="ws://localhost:8765" />
     <input id="sessionId" type="hidden" />
     <div class="app">
       <header class="appHeader">
@@ -914,6 +951,10 @@
             <details class="advancedControls">
               <summary>Advanced</summary>
               <div class="advancedGrid">
+                <div>
+                  <label for="wsUrl">Server endpoint</label>
+                  <input id="wsUrl" type="text" value="ws://localhost:8765" autocomplete="off" spellcheck="false" />
+                </div>
                 <div class="advancedTwo">
                   <div>
                     <label for="micLabel">Mic label</label>
@@ -934,6 +975,18 @@
                 </div>
               </div>
             </details>
+          </section>
+
+          <section class="sessionCard">
+            <div class="cardHead">
+              <div>
+                <div class="sourceTitle">Speaker memory</div>
+                <div class="sourceSub">Review voices after a meeting</div>
+              </div>
+              <span id="memoryStatus" class="pill">idle</span>
+            </div>
+            <button id="memoryReviewBtn" class="actionButton" type="button">Review voices</button>
+            <div id="speakerReviewList" class="memoryList"></div>
           </section>
 
           <section class="sourceCard">

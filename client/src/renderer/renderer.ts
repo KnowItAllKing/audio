@@ -5,6 +5,11 @@ import {
   speakerIdFromLabel
 } from "./audio/LoopbackDevice";
 import { MicInputFilter, getAudioStats, type MicInputFilterDecision } from "./audio/MicInputFilter";
+import {
+  loadSpeakerMemoryProfiles,
+  saveSpeakerMemoryProfiles,
+  type SpeakerMemoryProfile
+} from "./SpeakerMemoryStore";
 
 type TranscriptSegment = {
   id: string;
@@ -14,7 +19,7 @@ type TranscriptSegment = {
   stream_tags: StreamId[];
   speaker_id: string;
   speaker_label: string;
-  speaker_source: "stream" | "zoom" | "diarization" | "manual" | "unknown";
+  speaker_source: "stream" | "zoom" | "diarization" | "memory" | "manual" | "unknown";
   speaker_confidence: number;
   is_final: boolean;
   full_context_available: boolean;
@@ -34,10 +39,50 @@ type ErrorMessage = {
   message: string;
 };
 
+type SpeakerMemoryReviewSample = {
+  sample_id: string;
+  speaker_id: string;
+  speaker_label: string;
+  stream_id: StreamId;
+  start_sec: number;
+  end_sec: number;
+  duration_sec: number;
+  audio_wav_base64: string;
+  matched_profile_id?: string | null;
+  matched_name?: string | null;
+  match_confidence?: number | null;
+};
+
+type SpeakerMemoryReviewMessage = {
+  type: "speaker_memory_review";
+  session_id: string;
+  samples: SpeakerMemoryReviewSample[];
+};
+
+type SpeakerMemoryProfileMessage = {
+  type: "speaker_memory_profile";
+  session_id: string;
+  profile: SpeakerMemoryProfile;
+  profiles: SpeakerMemoryProfile[];
+};
+
+type SpeakerMemoryProfilesMessage = {
+  type: "speaker_memory_profiles";
+  session_id: string;
+  profiles: SpeakerMemoryProfile[];
+};
+
 type ControlMessage = {
   type: "control";
   session_id: string;
-  command: "metadata" | "speaker_activity" | "stop" | "ping";
+  command:
+    | "metadata"
+    | "speaker_activity"
+    | "stop"
+    | "ping"
+    | "speaker_memory_review"
+    | "speaker_memory_enroll"
+    | "speaker_memory_profiles";
   payload?: Record<string, unknown>;
 };
 
@@ -66,6 +111,9 @@ const sysMeterFillEl = $<HTMLDivElement>("sysMeterFill");
 const refreshBtn = $<HTMLButtonElement>("refreshBtn");
 const startBtn = $<HTMLButtonElement>("startBtn");
 const stopBtn = $<HTMLButtonElement>("stopBtn");
+const memoryReviewBtn = $<HTMLButtonElement>("memoryReviewBtn");
+const memoryStatusEl = $<HTMLSpanElement>("memoryStatus");
+const speakerReviewListEl = $<HTMLDivElement>("speakerReviewList");
 const transcriptEl = $<HTMLDivElement>("transcript");
 const speakerLegendEl = $<HTMLDivElement>("speakerLegend");
 const connStatusEl = $<HTMLSpanElement>("connStatus");
@@ -194,6 +242,7 @@ let micSender: AudioStreamSender | null = null;
 let sysSender: AudioStreamSender | null = null;
 
 let captures: CaptureHandle[] = [];
+const captureSwitchSeq: Record<StreamId, number> = { mic: 0, system: 0 };
 let micMuted = false;
 let micLastDecision: MicInputFilterDecision | null = null;
 const micInputFilter = new MicInputFilter();
@@ -207,6 +256,29 @@ function sendControl(command: ControlMessage["command"], payload?: Record<string
     payload
   };
   ws.send(JSON.stringify(msg));
+}
+
+function updateSpeakerMemoryStatus(profiles: SpeakerMemoryProfile[]): void {
+  if (profiles.length === 0) {
+    memoryStatusEl.textContent = "no saved voices";
+    memoryStatusEl.classList.remove("good", "bad");
+    return;
+  }
+  memoryStatusEl.textContent = `${profiles.length} saved voice${profiles.length === 1 ? "" : "s"}`;
+  memoryStatusEl.classList.add("good");
+  memoryStatusEl.classList.remove("bad");
+}
+
+function syncSpeakerMemoryProfiles(): void {
+  const profiles = loadSpeakerMemoryProfiles();
+  updateSpeakerMemoryStatus(profiles);
+  sendControl("speaker_memory_profiles", { profiles });
+}
+
+function storeSpeakerMemoryProfiles(profiles: SpeakerMemoryProfile[]): SpeakerMemoryProfile[] {
+  const saved = saveSpeakerMemoryProfiles(profiles);
+  updateSpeakerMemoryStatus(saved);
+  return saved;
 }
 
 function sendSpeakerMetadata(): void {
@@ -260,6 +332,58 @@ function updateSentStats(): void {
   sentStatsEl.textContent = `mic=${micSender?.getSentCount() ?? 0} sys=${sysSender?.getSentCount() ?? 0}`;
 }
 
+function isConnected(): boolean {
+  return !!ws && ws.readyState === WebSocket.OPEN;
+}
+
+function selectedDeviceForStream(streamId: StreamId): string {
+  return streamId === "mic" ? micSelect.value : sysSelect.value;
+}
+
+function setStreamSender(streamId: StreamId, sender: AudioStreamSender | null): void {
+  if (streamId === "mic") {
+    micSender = sender;
+  } else {
+    sysSender = sender;
+  }
+  updateSentStats();
+}
+
+function setStreamLevelStatus(
+  streamId: StreamId,
+  text: string,
+  kind: "good" | "bad" | "neutral" = "neutral"
+): void {
+  const statusEl = streamId === "mic" ? micLevelStatusEl : sysLevelStatusEl;
+  const fillEl = streamId === "mic" ? micMeterFillEl : sysMeterFillEl;
+  statusEl.textContent = text;
+  statusEl.classList.remove("good", "bad");
+  if (kind === "good") statusEl.classList.add("good");
+  if (kind === "bad") statusEl.classList.add("bad");
+  fillEl.style.width = "0%";
+}
+
+async function stopCapturesForStream(streamId: StreamId): Promise<void> {
+  const keep: CaptureHandle[] = [];
+  const stopping: CaptureHandle[] = [];
+  for (const capture of captures) {
+    if (capture.streamId === streamId) {
+      stopping.push(capture);
+    } else {
+      keep.push(capture);
+    }
+  }
+  captures = keep;
+  await Promise.all(stopping.map((capture) => capture.stop()));
+  setStreamSender(streamId, null);
+  setStreamLevelStatus(streamId, "idle");
+  if (streamId === "mic") {
+    micInputFilter.reset();
+    micLastDecision = null;
+    updateMicGateStatus(null);
+  }
+}
+
 function applyMicMuteToTracks(): void {
   for (const capture of captures) {
     if (capture.streamId !== "mic") continue;
@@ -305,7 +429,7 @@ function hashString(value: string): number {
 function toneClass(segment: TranscriptSegment): string {
   const label = (segment.speaker_label || "").toLowerCase();
   if (segment.stream_tags.includes("mic") || label === "you") return "tone-you";
-  if (segment.speaker_source !== "diarization") return "tone-system";
+  if (segment.speaker_source !== "diarization" && segment.speaker_source !== "memory") return "tone-system";
   const tones = ["tone-a", "tone-b", "tone-c"];
   return tones[hashString(segment.speaker_id || segment.speaker_label) % tones.length];
 }
@@ -407,6 +531,94 @@ function renderTranscript(): void {
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
 
+function requestSpeakerMemoryReview(): void {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    memoryStatusEl.textContent = "not connected";
+    memoryStatusEl.classList.add("bad");
+    memoryStatusEl.classList.remove("good");
+    return;
+  }
+  memoryStatusEl.textContent = "loading";
+  memoryStatusEl.classList.remove("good", "bad");
+  sendControl("speaker_memory_review", {});
+}
+
+function enrollSpeakerMemorySample(sampleId: string, name: string): void {
+  const cleanName = name.trim();
+  if (!cleanName) {
+    memoryStatusEl.textContent = "name required";
+    memoryStatusEl.classList.add("bad");
+    memoryStatusEl.classList.remove("good");
+    return;
+  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    memoryStatusEl.textContent = "not connected";
+    memoryStatusEl.classList.add("bad");
+    memoryStatusEl.classList.remove("good");
+    return;
+  }
+  memoryStatusEl.textContent = "saving";
+  memoryStatusEl.classList.remove("good", "bad");
+  sendControl("speaker_memory_enroll", { sample_id: sampleId, name: cleanName });
+}
+
+function renderSpeakerMemoryReview(samples: SpeakerMemoryReviewSample[]): void {
+  if (!samples.length) {
+    memoryStatusEl.textContent = "no clips";
+    memoryStatusEl.classList.remove("good");
+    speakerReviewListEl.replaceChildren();
+    return;
+  }
+
+  memoryStatusEl.textContent = `${samples.length} clip${samples.length === 1 ? "" : "s"}`;
+  memoryStatusEl.classList.add("good");
+  memoryStatusEl.classList.remove("bad");
+
+  speakerReviewListEl.replaceChildren(
+    ...samples.map((sample) => {
+      const card = document.createElement("div");
+      card.className = "memorySample";
+
+      const head = document.createElement("div");
+      head.className = "memorySampleHead";
+
+      const label = document.createElement("span");
+      label.textContent = sample.matched_name || sample.speaker_label || sample.speaker_id;
+
+      const timing = document.createElement("span");
+      timing.textContent = `${formatTime(sample.start_sec)} · ${sample.duration_sec.toFixed(1)}s`;
+
+      head.append(label, timing);
+
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.src = `data:audio/wav;base64,${sample.audio_wav_base64}`;
+
+      const enroll = document.createElement("div");
+      enroll.className = "memoryEnroll";
+
+      const input = document.createElement("input");
+      input.type = "text";
+      input.placeholder = "Speaker name";
+      input.value = sample.matched_name || "";
+
+      const button = document.createElement("button");
+      button.className = "actionButton";
+      button.type = "button";
+      button.textContent = sample.matched_name ? "Update" : "Save";
+      button.addEventListener("click", () => enrollSpeakerMemorySample(sample.sample_id, input.value));
+
+      input.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") enrollSpeakerMemorySample(sample.sample_id, input.value);
+      });
+
+      enroll.append(input, button);
+      card.append(head, audio, enroll);
+      return card;
+    })
+  );
+}
+
 async function requestPermissionOnce(): Promise<void> {
   // On some platforms, labels are empty until permission is granted.
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -456,6 +668,11 @@ async function refreshDevices(): Promise<void> {
     sysSelect.value = prevSys;
   } else if (loopback) {
     sysSelect.value = loopback.deviceId;
+  }
+
+  if (isConnected()) {
+    if (micSelect.value !== prevMic) void replaceStreamCapture("mic", micSelect.value, true);
+    if (sysSelect.value !== prevSys) void replaceStreamCapture("system", sysSelect.value, true);
   }
 }
 
@@ -507,10 +724,89 @@ async function startCaptureForDevice(
   return { streamId, mediaStream, audioContext, source, processor, stop };
 }
 
+async function replaceStreamCapture(
+  streamId: StreamId,
+  deviceId: string,
+  announce: boolean
+): Promise<void> {
+  if (!isConnected() || !ws) return;
+
+  const seq = captureSwitchSeq[streamId] + 1;
+  captureSwitchSeq[streamId] = seq;
+  await stopCapturesForStream(streamId);
+
+  if (!deviceId) {
+    setStreamLevelStatus(streamId, "off");
+    if (announce) appendTranscriptNotice(`${sourceLabelForStream(streamId)} source off`);
+    return;
+  }
+
+  setStreamLevelStatus(streamId, "switching");
+  const activeWs = ws;
+  const sessionId = sessionIdInput.value.trim();
+  const tmpSender = new AudioStreamSender({
+    ws: activeWs,
+    sessionId,
+    streamId,
+    sampleRateHz: 48000
+  });
+  setStreamSender(streamId, tmpSender);
+
+  let handle: CaptureHandle;
+  try {
+    handle = await startCaptureForDevice(streamId, deviceId, tmpSender);
+  } catch (e) {
+    if (captureSwitchSeq[streamId] === seq) {
+      setStreamSender(streamId, null);
+      setStreamLevelStatus(streamId, "source error", "bad");
+      appendTranscriptNotice(`${sourceLabelForStream(streamId)} source error: ${String(e)}`, "bad");
+    }
+    return;
+  }
+
+  if (
+    captureSwitchSeq[streamId] !== seq ||
+    ws !== activeWs ||
+    !isConnected() ||
+    selectedDeviceForStream(streamId) !== deviceId
+  ) {
+    await handle.stop();
+    return;
+  }
+
+  const sender = new AudioStreamSender({
+    ws: activeWs,
+    sessionId,
+    streamId,
+    sampleRateHz: handle.audioContext.sampleRate
+  });
+  setStreamSender(streamId, sender);
+  handle.processor.onaudioprocess = (ev) => {
+    const input = ev.inputBuffer.getChannelData(0);
+    if (streamId === "mic") {
+      pushMicInput(input);
+    } else {
+      pushSystemInput(input);
+    }
+  };
+  captures.push(handle);
+  applyMicMuteToTracks();
+  setStreamLevelStatus(streamId, "listening", "good");
+  if (announce) appendTranscriptNotice(`${sourceLabelForStream(streamId)} source changed`);
+}
+
+function sourceLabelForStream(streamId: StreamId): string {
+  return streamId === "mic" ? "Microphone" : "Meeting audio";
+}
+
 async function start(): Promise<void> {
   const url = wsUrlInput.value.trim() || "ws://localhost:8765";
   const sessionId = sessionIdInput.value.trim() || uuidv4();
   sessionIdInput.value = sessionId;
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.close();
+  }
 
   segmentsById.clear();
   recvCount = 0;
@@ -525,6 +821,8 @@ async function start(): Promise<void> {
   recvStatsEl.textContent = "0";
   transcriptEl.replaceChildren();
   speakerLegendEl.replaceChildren();
+  speakerReviewListEl.replaceChildren();
+  updateSpeakerMemoryStatus(loadSpeakerMemoryProfiles());
   activeSpeakerStatusEl.textContent = "idle";
   activeSpeakerStatusEl.classList.remove("good", "bad");
   setLastUpdate(null);
@@ -539,65 +837,11 @@ async function start(): Promise<void> {
     setConnStatus("Connected", "good");
     startBtn.disabled = true;
     stopBtn.disabled = false;
+    syncSpeakerMemoryProfiles();
     sendSpeakerMetadata();
 
-    const micId = micSelect.value;
-    const sysId = sysSelect.value;
-
-    const handles: CaptureHandle[] = [];
-    if (!ws) return;
-
-    // Create senders (chunkDurationMs default is 250ms).
-    // The sender wants a stable sample rate; we create the AudioContext first and pass its sample rate.
-    // We create per-stream sender inside the capture start function after AudioContext is created.
-    if (micId) {
-      // temporary sender; will be recreated once we know the actual AudioContext sampleRate
-      const tmp = new AudioStreamSender({
-        ws,
-        sessionId,
-        streamId: "mic",
-        sampleRateHz: 48000
-      });
-      micSender = tmp;
-      const handle = await startCaptureForDevice("mic", micId, tmp);
-      // Replace sender with accurate sampleRate from the created context.
-      micSender = new AudioStreamSender({
-        ws,
-        sessionId,
-        streamId: "mic",
-        sampleRateHz: handle.audioContext.sampleRate
-      });
-      // Point processor to the new sender.
-      handle.processor.onaudioprocess = (ev) => {
-        const input = ev.inputBuffer.getChannelData(0);
-        pushMicInput(input);
-      };
-      handles.push(handle);
-    }
-    if (sysId) {
-      const tmp = new AudioStreamSender({
-        ws,
-        sessionId,
-        streamId: "system",
-        sampleRateHz: 48000
-      });
-      sysSender = tmp;
-      const handle = await startCaptureForDevice("system", sysId, tmp);
-      sysSender = new AudioStreamSender({
-        ws,
-        sessionId,
-        streamId: "system",
-        sampleRateHz: handle.audioContext.sampleRate
-      });
-      handle.processor.onaudioprocess = (ev) => {
-        const input = ev.inputBuffer.getChannelData(0);
-        pushSystemInput(input);
-      };
-      handles.push(handle);
-    }
-
-    captures = handles;
-    applyMicMuteToTracks();
+    await replaceStreamCapture("mic", micSelect.value, false);
+    await replaceStreamCapture("system", sysSelect.value, false);
   };
 
   ws.onmessage = (ev) => {
@@ -618,6 +862,18 @@ async function start(): Promise<void> {
       recvStatsEl.textContent = String(recvCount);
       setLastUpdate(Date.now());
       renderTranscript();
+    } else if (type === "speaker_memory_review") {
+      const review = msg as SpeakerMemoryReviewMessage;
+      renderSpeakerMemoryReview(review.samples ?? []);
+    } else if (type === "speaker_memory_profile") {
+      const profile = msg as SpeakerMemoryProfileMessage;
+      storeSpeakerMemoryProfiles(profile.profiles ?? [profile.profile]);
+      memoryStatusEl.textContent = `saved ${profile.profile.name}`;
+      memoryStatusEl.classList.add("good");
+      memoryStatusEl.classList.remove("bad");
+    } else if (type === "speaker_memory_profiles") {
+      const profiles = msg as SpeakerMemoryProfilesMessage;
+      storeSpeakerMemoryProfiles(profiles.profiles ?? []);
     } else if (type === "error") {
       const err = msg as ErrorMessage;
       setConnStatus(`Error: ${err.code}`, "bad");
@@ -638,6 +894,8 @@ async function start(): Promise<void> {
 
 async function stop(): Promise<void> {
   endedAt = Date.now();
+  captureSwitchSeq.mic += 1;
+  captureSwitchSeq.system += 1;
 
   for (const c of captures) {
     await c.stop();
@@ -647,13 +905,17 @@ async function stop(): Promise<void> {
   if (ws && ws.readyState === WebSocket.OPEN) {
     try {
       sendControl("stop", {});
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      ws.close();
+      sendControl("speaker_memory_review", {});
     } catch {}
   }
-  ws = null;
   micSender = null;
   sysSender = null;
+  updateSentStats();
+  setStreamLevelStatus("mic", "idle");
+  setStreamLevelStatus("system", "idle");
+  micInputFilter.reset();
+  micLastDecision = null;
+  updateMicGateStatus(null);
 
   startBtn.disabled = false;
   stopBtn.disabled = true;
@@ -696,6 +958,9 @@ async function stop(): Promise<void> {
 refreshBtn.addEventListener("click", () => void refreshDevices());
 startBtn.addEventListener("click", () => void start());
 stopBtn.addEventListener("click", () => void stop());
+micSelect.addEventListener("change", () => void replaceStreamCapture("mic", micSelect.value, true));
+sysSelect.addEventListener("change", () => void replaceStreamCapture("system", sysSelect.value, true));
+memoryReviewBtn.addEventListener("click", () => requestSpeakerMemoryReview());
 micMuteBtn.addEventListener("click", () => {
   micMuted = !micMuted;
   micInputFilter.reset();
@@ -725,4 +990,5 @@ setTranscriptViewMode("bubbles");
 setConnStatus("Disconnected");
 updateMicMuteUi();
 updateMicGateStatus(null);
+updateSpeakerMemoryStatus(loadSpeakerMemoryProfiles());
 void refreshDevices();

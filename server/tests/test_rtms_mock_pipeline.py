@@ -112,7 +112,7 @@ def test_mock_rtms_messages_follow_expected_specs() -> None:
 
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning:websockets")
-def test_mock_rtms_audio_to_transcript_pipeline() -> None:
+def test_mock_rtms_audio_to_transcript_pipeline(require_loopback_bind: None) -> None:
     asyncio.run(run_mock_rtms_audio_to_transcript_pipeline())
 
 

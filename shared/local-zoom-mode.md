@@ -62,12 +62,20 @@ when you want known names instead of anonymous labels:
 
 Manual labels beat diarization labels.
 
+After a meeting, use Speaker memory to play short diarized clips and name them.
+Saved names can be matched automatically in later meetings when confidence is
+high enough. Persisted voice fingerprints live in the client; the server keeps
+clips and fingerprints in memory only. Unknown or low-confidence voices stay
+anonymous.
+
 ## Checks
 
 - Mic level moves only when you speak.
 - System level moves when Zoom participants talk.
 - Sent stats show `sys` increasing during Zoom audio.
 - Transcript lines with `[system]` use `Speaker 1`, `Speaker 2`, etc.
+- Speaker memory can replay short clips and save local names after the session.
+- Persisted voice fingerprints live in the client, not the server.
 - Manual advanced labels override anonymous diarization labels when set.
 - Pause between phrases creates separate final transcript lines.
 

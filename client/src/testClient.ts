@@ -28,7 +28,7 @@ type TranscriptUpdateMessage = {
     stream_tags: StreamId[];
     speaker_id: string;
     speaker_label: string;
-    speaker_source: "stream" | "zoom" | "diarization" | "manual" | "unknown";
+    speaker_source: "stream" | "zoom" | "diarization" | "memory" | "manual" | "unknown";
     speaker_confidence: number;
     is_final: boolean;
     full_context_available: boolean;

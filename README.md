@@ -83,7 +83,7 @@ The protocol separates audio source tags from speaker identity:
 
 - `stream_tags`: audio provenance, currently `mic` and/or `system`
 - `speaker_id` / `speaker_label`: person label when known
-- `speaker_source`: `manual`, `stream`, `zoom`, `diarization`, or `unknown`
+- `speaker_source`: `manual`, `stream`, `zoom`, `diarization`, `memory`, or `unknown`
 
 Without Zoom metadata or diarization, mic defaults to `You` and system audio
 defaults to `System audio`. The Electron client sends editable local labels and
@@ -122,6 +122,31 @@ Real diarization smoke test:
 ```bash
 DIARIZATION_HF_TOKEN=<hugging-face-token> make real-diarization
 ```
+
+### Speaker memory
+
+After a meeting, diarized speakers can be reviewed as short local audio clips.
+Name a clip once, and future matching can label similar speakers with that saved
+name. This is a local voice-profile layer on top of diarization; it does not
+make diarization itself know real names.
+
+Defaults:
+
+- review clips are temporary server-memory samples for playback and enrollment
+- saved profiles store local voice fingerprints, not raw audio clips
+- the Electron client owns persisted fingerprints in client-side app storage
+- the server receives fingerprints from the client and keeps them in memory only
+- set `SPEAKER_MEMORY_ENABLED=0` to disable speaker memory
+- set `SPEAKER_MEMORY_THRESHOLD` to tune match confidence
+
+Manual TTS smoke harness:
+
+```bash
+make speaker-memory-tts
+```
+
+This uses macOS `say` voices as a repeatable sanity check. Passing it is useful,
+but it is not proof that real meeting voices will always match correctly.
 
 ### Mock Zoom RTMS testing
 
