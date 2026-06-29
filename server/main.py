@@ -8,6 +8,7 @@ import logging
 import os
 import time
 import warnings
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -31,6 +32,25 @@ from .whisper_backend import WhisperBackend, create_backend
 
 
 logger = logging.getLogger("server")
+
+
+def _load_dotenv(path: Path | None = None) -> None:
+    env_path = path or Path(__file__).resolve().parent / ".env"
+    if not env_path.exists():
+        return
+
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or key in os.environ:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        os.environ[key] = value
 
 
 def _new_webrtc_vad(aggressiveness: int) -> Any:
@@ -681,6 +701,7 @@ async def _run_server() -> None:
 
 
 def main() -> None:
+    _load_dotenv()
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",

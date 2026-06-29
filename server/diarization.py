@@ -88,12 +88,15 @@ class PyannoteDiarizationBackend:
 
 
 def create_diarization_backend() -> Optional[DiarizationBackend]:
-    backend = os.environ.get("DIARIZATION_BACKEND", "").strip().lower()
-    if backend in ("", "0", "false", "off", "disabled", "none"):
+    backend = os.environ.get("DIARIZATION_BACKEND", "auto").strip().lower() or "auto"
+    if backend in ("0", "false", "off", "disabled", "none"):
         return None
 
     try:
-        if backend in ("pyannote", "pyannote-community", "community"):
+        if backend == "auto" and not _hf_token_present():
+            logger.info("diarization backend: auto disabled; no Hugging Face token found")
+            return None
+        if backend in ("auto", "1", "true", "on", "enabled", "pyannote", "pyannote-community", "community"):
             out = PyannoteDiarizationBackend()
             logger.info("diarization backend: pyannote model=%s device=%s", out.model_name, out.device)
             return out
@@ -202,6 +205,14 @@ def _required_hf_token() -> str:
     if not token:
         raise ValueError("DIARIZATION_HF_TOKEN, HF_TOKEN, or HUGGINGFACE_TOKEN is required for diarization")
     return token
+
+
+def _hf_token_present() -> bool:
+    return bool(
+        os.environ.get("DIARIZATION_HF_TOKEN")
+        or os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGINGFACE_TOKEN")
+    )
 
 
 def _model_load_error_message(model_name: str = "pyannote/speaker-diarization-community-1") -> str:

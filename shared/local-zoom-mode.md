@@ -7,8 +7,8 @@ Use this when you cannot create or authorize a Zoom RTMS app.
 ```txt
 Zoom speaker output -> virtual loopback input -> system stream
 Your microphone -> mic stream
-Manual current speaker label -> speaker_activity
-Optional pyannote diarization -> Speaker 1 / Speaker 2 labels
+Pyannote diarization -> Speaker 1 / Speaker 2 labels
+Optional manual current speaker label -> speaker_activity
 Whisper -> phrase transcript
 ```
 
@@ -36,38 +36,39 @@ Whisper -> phrase transcript
 
 ## Speaker Labels
 
-Without RTMS, Zoom does not send participant metadata to this app. Use Current
-Zoom speaker when you want labels:
-
-1. Type the visible speaker name.
-2. Click Set active speaker, or press Enter.
-3. System transcript phrases after that point use that label until changed.
-
-Optional pyannote diarization can split mixed system audio into anonymous speaker labels:
+Without RTMS, Zoom does not send participant metadata to this app. Pyannote
+diarization can split mixed system audio into anonymous speaker labels:
 
 ```bash
 uv sync --project server --extra dev --extra diarization
 
-DIARIZATION_BACKEND=pyannote \
 DIARIZATION_HF_TOKEN=<hugging-face-token> \
 DIARIZATION_STREAMS=system \
 PYTHONPATH=. uv run --project server --extra diarization python -m server.main
 ```
 
+`server.main` loads `server/.env`, so normal local use can keep the token there.
+Set `DIARIZATION_BACKEND=off` to disable diarization.
+
 Accept Hugging Face access terms for `pyannote/speaker-diarization-community-1`
 before running this.
 
-Manual labels beat diarization labels. Use diarization for automatic separation,
-then set Current Zoom speaker when you know the real name.
+Manual labels are in the app's advanced speaker-label controls. Use them only
+when you want known names instead of anonymous labels:
+
+1. Type the visible speaker name.
+2. Click Set active speaker, or press Enter.
+3. System transcript phrases after that point use that label until changed.
+
+Manual labels beat diarization labels.
 
 ## Checks
 
 - Mic level moves only when you speak.
 - System level moves when Zoom participants talk.
 - Sent stats show `sys` increasing during Zoom audio.
-- Transcript lines with `[system]` use the active speaker label when set.
-- With diarization enabled, unlabeled `[system]` lines use `Speaker 1`,
-  `Speaker 2`, etc.
+- Transcript lines with `[system]` use `Speaker 1`, `Speaker 2`, etc.
+- Manual advanced labels override anonymous diarization labels when set.
 - Pause between phrases creates separate final transcript lines.
 
 ## Limits

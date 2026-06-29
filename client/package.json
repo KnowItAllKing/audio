@@ -1,19 +1,49 @@
 {
   "name": "audio-client",
+  "version": "0.1.0",
+  "description": "Local audio transcription Electron client",
+  "author": "Local",
   "private": true,
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "dist:mac": "electron-vite build && electron-builder --mac dir",
     "preview": "electron-vite preview",
     "dev:test-client": "tsx src/testClient.ts",
     "test:audio-filter": "tsx src/renderer/audio/runAudioSpecs.ts"
+  },
+  "build": {
+    "appId": "local.audio.transcriber",
+    "productName": "Local Audio Transcriber",
+    "asar": true,
+    "npmRebuild": false,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dir"
+      ],
+      "category": "public.app-category.productivity",
+      "hardenedRuntime": false,
+      "identity": null,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Local Audio Transcriber needs microphone access to transcribe local audio.",
+        "NSScreenCaptureDescription": "Local Audio Transcriber may use screen or system audio capture for local meeting transcription."
+      }
+    }
   },
   "devDependencies": {
     "@types/node": "^24.13.2",
     "@types/ws": "^8.18.1",
     "electron": "^42.4.1",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",

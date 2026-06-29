@@ -63,6 +63,9 @@ uv sync --project server --extra dev
 PYTHONPATH=. uv run --project server python -m server.main
 ```
 
+`server.main` loads `server/.env` on startup. Existing shell environment values
+win over `.env` values.
+
 ### Optional: VAD / noise filtering (server-side)
 
 The server runs an always-on VAD gate to avoid transcribing near-silence (reduces hallucinated short tokens).
@@ -86,16 +89,17 @@ Without Zoom metadata or diarization, mic defaults to `You` and system audio
 defaults to `System audio`. The Electron client sends editable local labels and
 can send manual current-speaker activity for app-independent Zoom mode.
 
-### Optional pyannote diarization
+### Pyannote diarization
 
-Diarization is optional and heavy. It uses pyannote.audio Community-1 and labels
-mixed system audio as `Speaker 1`, `Speaker 2`, etc. Manual and Zoom speaker
-labels take priority over diarization labels.
+Diarization uses pyannote.audio Community-1 and labels mixed system audio as
+`Speaker 1`, `Speaker 2`, etc. It auto-enables when pyannote is installed and
+`DIARIZATION_HF_TOKEN`, `HF_TOKEN`, or `HUGGINGFACE_TOKEN` is present. Put the
+token in `server/.env` for normal local use. Manual and Zoom speaker labels
+still take priority when explicitly used.
 
 ```bash
 uv sync --project server --extra dev --extra diarization
 
-DIARIZATION_BACKEND=pyannote \
 DIARIZATION_HF_TOKEN=<hugging-face-token> \
 DIARIZATION_DEVICE=cpu \
 DIARIZATION_STREAMS=system \
@@ -107,6 +111,7 @@ Useful knobs:
 - `DIARIZATION_MIN_SPEAKERS`
 - `DIARIZATION_MAX_SPEAKERS`
 - `DIARIZATION_MIN_TURN_SEC=0.2`
+- `DIARIZATION_BACKEND=off` to disable diarization
 - `DIARIZATION_STRICT=1` to fail server startup if diarization cannot load
 
 pyannote models may require accepting gated Hugging Face model terms for
@@ -195,6 +200,16 @@ For Zoom without a Zoom app, use [Local Zoom Mode](shared/local-zoom-mode.md).
 pnpm install
 pnpm --filter audio-client dev
 ```
+
+Build a local unsigned macOS `.app` bundle:
+
+```bash
+pnpm --filter audio-client dist:mac
+open "client/dist/mac-arm64/Local Audio Transcriber.app"
+```
+
+The packaged app is a client bundle only; start the Python websocket server
+separately before connecting.
 
 Dependency install scripts are disabled. Electron's npm package may fetch its
 app bundle the first time `electron` runs; treat that as an explicit local

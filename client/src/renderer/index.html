@@ -159,6 +159,17 @@
       .wide {
         grid-column: 1 / -1;
       }
+      details.advancedControls {
+        margin-top: 12px;
+      }
+      details.advancedControls > summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      details.advancedControls[open] > summary {
+        margin-bottom: 12px;
+      }
     </style>
   </head>
   <body>
@@ -193,19 +204,6 @@
           <div>
             <label for="sysSelect">System device (virtual input)</label>
             <select id="sysSelect"></select>
-          </div>
-        </div>
-
-        <div style="height: 12px"></div>
-
-        <div class="grid">
-          <div>
-            <label for="micLabel">Mic speaker label</label>
-            <input id="micLabel" type="text" value="You" />
-          </div>
-          <div>
-            <label for="sysLabel">System fallback label</label>
-            <input id="sysLabel" type="text" value="System audio" />
           </div>
         </div>
 
@@ -261,21 +259,37 @@
 
         <div style="height: 12px"></div>
 
-        <div class="grid">
-          <div>
-            <label for="activeSpeakerLabel">Current Zoom speaker</label>
-            <input id="activeSpeakerLabel" type="text" placeholder="Name" />
-          </div>
-          <div>
-            <label for="activeSpeakerBtn">Speaker label</label>
-            <button id="activeSpeakerBtn" type="button">Set active speaker</button>
-          </div>
-          <div class="wide">
-            <div class="inlineControl">
-              <span id="activeSpeakerStatus" class="pill">idle</span>
+        <details class="advancedControls">
+          <summary>Advanced speaker labels</summary>
+          <div class="grid">
+            <div>
+              <label for="micLabel">Mic speaker label</label>
+              <input id="micLabel" type="text" value="You" />
+            </div>
+            <div>
+              <label for="sysLabel">System fallback label</label>
+              <input id="sysLabel" type="text" value="System audio" />
             </div>
           </div>
-        </div>
+
+          <div style="height: 12px"></div>
+
+          <div class="grid">
+            <div>
+              <label for="activeSpeakerLabel">Current Zoom speaker</label>
+              <input id="activeSpeakerLabel" type="text" placeholder="Name" />
+            </div>
+            <div>
+              <label for="activeSpeakerBtn">Speaker label</label>
+              <button id="activeSpeakerBtn" type="button">Set active speaker</button>
+            </div>
+            <div class="wide">
+              <div class="inlineControl">
+                <span id="activeSpeakerStatus" class="pill">idle</span>
+              </div>
+            </div>
+          </div>
+        </details>
 
         <div style="height: 12px"></div>
 

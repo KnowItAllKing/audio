@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
-from server.diarization import DiarizationTurn, _turns_from_pyannote_annotation
+from server import diarization as diarization_module
+from server.diarization import DiarizationTurn, _turns_from_pyannote_annotation, create_diarization_backend
+from server.main import _load_dotenv
 from server.main import _apply_diarization_turns
 from server.session_state import SessionState, StreamBuffer
 from server.speakers import SpeakerTracker
@@ -63,6 +66,60 @@ def test_turns_from_pyannote_annotation_maps_stable_labels() -> None:
         ("diarization:SPEAKER_01", "Speaker 2"),
         ("diarization:SPEAKER_00", "Speaker 1"),
     ]
+
+
+def test_load_dotenv_sets_missing_values_only(tmp_path, monkeypatch) -> None:
+    loaded_keys = ("HF_TOKEN", "DIARIZATION_DEVICE", "WHISPER_MODEL")
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "\n".join(
+            [
+                "# local secrets",
+                "HF_TOKEN=from-file",
+                "DIARIZATION_DEVICE='cpu'",
+                'WHISPER_MODEL="tiny"',
+                "EXISTING=from-file",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("DIARIZATION_DEVICE", raising=False)
+    monkeypatch.delenv("WHISPER_MODEL", raising=False)
+    monkeypatch.setenv("EXISTING", "from-env")
+
+    try:
+        _load_dotenv(dotenv)
+
+        assert os.environ["HF_TOKEN"] == "from-file"
+        assert os.environ["DIARIZATION_DEVICE"] == "cpu"
+        assert os.environ["WHISPER_MODEL"] == "tiny"
+        assert os.environ["EXISTING"] == "from-env"
+    finally:
+        for key in loaded_keys:
+            os.environ.pop(key, None)
+
+
+def test_auto_diarization_is_off_without_token(monkeypatch) -> None:
+    monkeypatch.delenv("DIARIZATION_BACKEND", raising=False)
+    monkeypatch.delenv("DIARIZATION_HF_TOKEN", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+
+    assert create_diarization_backend() is None
+
+
+def test_auto_diarization_uses_pyannote_when_token_exists(monkeypatch) -> None:
+    class FakeBackend:
+        model_name = "fake-model"
+        device = "cpu"
+
+    fake_backend = FakeBackend()
+    monkeypatch.delenv("DIARIZATION_BACKEND", raising=False)
+    monkeypatch.setenv("HF_TOKEN", "token")
+    monkeypatch.setattr(diarization_module, "PyannoteDiarizationBackend", lambda: fake_backend)
+
+    assert create_diarization_backend() is fake_backend
 
 
 def test_apply_diarization_turns_anchors_to_client_timestamps() -> None:
