@@ -205,7 +205,7 @@ Build a local unsigned macOS `.app` bundle:
 
 ```bash
 pnpm --filter audio-client dist:mac
-open "client/dist/mac-arm64/Local Audio Transcriber.app"
+open "client/dist/mac-arm64/Cadence.app"
 ```
 
 The packaged app is a client bundle only; start the Python websocket server

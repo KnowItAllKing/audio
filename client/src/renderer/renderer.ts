@@ -67,10 +67,14 @@ const refreshBtn = $<HTMLButtonElement>("refreshBtn");
 const startBtn = $<HTMLButtonElement>("startBtn");
 const stopBtn = $<HTMLButtonElement>("stopBtn");
 const transcriptEl = $<HTMLDivElement>("transcript");
+const speakerLegendEl = $<HTMLDivElement>("speakerLegend");
 const connStatusEl = $<HTMLSpanElement>("connStatus");
 const lastUpdateEl = $<HTMLSpanElement>("lastUpdate");
 const sentStatsEl = $<HTMLSpanElement>("sentStats");
 const recvStatsEl = $<HTMLSpanElement>("recvStats");
+const viewBubblesBtn = $<HTMLButtonElement>("viewBubblesBtn");
+const viewBlocksBtn = $<HTMLButtonElement>("viewBlocksBtn");
+const viewScriptBtn = $<HTMLButtonElement>("viewScriptBtn");
 
 function uuidv4(): string {
   // Browser-safe UUID (Chromium supports crypto.randomUUID)
@@ -184,6 +188,7 @@ let endedAt: number | null = null;
 
 const segmentsById = new Map<string, TranscriptSegment>();
 let recvCount = 0;
+let transcriptViewMode: "bubbles" | "blocks" | "script" = "bubbles";
 
 let micSender: AudioStreamSender | null = null;
 let sysSender: AudioStreamSender | null = null;
@@ -288,20 +293,117 @@ function pushSystemInput(input: Float32Array): void {
   updateSentStats();
 }
 
+function hashString(value: string): number {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    hash = (hash << 5) - hash + value.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function toneClass(segment: TranscriptSegment): string {
+  const label = (segment.speaker_label || "").toLowerCase();
+  if (segment.stream_tags.includes("mic") || label === "you") return "tone-you";
+  if (segment.speaker_source !== "diarization") return "tone-system";
+  const tones = ["tone-a", "tone-b", "tone-c"];
+  return tones[hashString(segment.speaker_id || segment.speaker_label) % tones.length];
+}
+
+function sourceLabel(segment: TranscriptSegment): string {
+  if (segment.stream_tags.includes("mic")) return "Microphone";
+  if (segment.stream_tags.includes("system")) return "Meeting audio";
+  return segment.stream_tags.join(", ");
+}
+
+function speakerLabel(segment: TranscriptSegment): string {
+  return segment.speaker_label || segment.speaker_id || sourceLabel(segment);
+}
+
+function renderSpeakerLegend(segs: TranscriptSegment[]): void {
+  const seen = new Set<string>();
+  const chips: HTMLDivElement[] = [];
+
+  for (const segment of segs) {
+    const label = speakerLabel(segment);
+    if (seen.has(label)) continue;
+    seen.add(label);
+
+    const chip = document.createElement("div");
+    chip.className = `legendChip ${toneClass(segment)}`;
+
+    const dot = document.createElement("span");
+    dot.className = "legendDot";
+
+    chip.append(dot, document.createTextNode(label));
+    chips.push(chip);
+  }
+
+  speakerLegendEl.replaceChildren(...chips);
+}
+
+function setTranscriptViewMode(mode: "bubbles" | "blocks" | "script"): void {
+  transcriptViewMode = mode;
+  transcriptEl.classList.toggle("view-blocks", mode === "blocks");
+  transcriptEl.classList.toggle("view-script", mode === "script");
+  viewBubblesBtn.classList.toggle("active", mode === "bubbles");
+  viewBlocksBtn.classList.toggle("active", mode === "blocks");
+  viewScriptBtn.classList.toggle("active", mode === "script");
+  renderTranscript();
+}
+
+function appendTranscriptNotice(text: string, kind: "neutral" | "bad" = "neutral"): void {
+  const line = document.createElement("div");
+  line.className = `noticeLine ${kind === "bad" ? "bad" : ""}`.trim();
+  line.textContent = text;
+  transcriptEl.appendChild(line);
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
 function renderTranscript(): void {
   const segs = [...segmentsById.values()].sort((a, b) => {
     if (a.start_sec !== b.start_sec) return a.start_sec - b.start_sec;
     return a.id.localeCompare(b.id);
   });
 
-  transcriptEl.textContent = segs
-    .map((s) => {
-      const tags = s.stream_tags.join(",");
-      const speaker = s.speaker_label || s.speaker_id || tags;
-      const finalMark = s.is_final ? "" : " ...";
-      return `[${formatTime(s.start_sec)}–${formatTime(s.end_sec)}] ${speaker} [${tags}] ${s.text}${finalMark}`;
+  renderSpeakerLegend(segs);
+
+  transcriptEl.replaceChildren(
+    ...segs.map((s) => {
+      const entry = document.createElement("article");
+      entry.className = `transcriptEntry ${toneClass(s)} ${s.is_final ? "" : "isPartial"}`.trim();
+
+      const meta = document.createElement("div");
+      meta.className = "speakerMeta";
+
+      const speaker = document.createElement("span");
+      speaker.className = "speakerName";
+      speaker.textContent = speakerLabel(s);
+
+      const time = document.createElement("span");
+      time.textContent = `${formatTime(s.start_sec)}-${formatTime(s.end_sec)}`;
+
+      const source = document.createElement("span");
+      source.className = "speakerSource";
+      source.textContent = sourceLabel(s);
+
+      meta.append(speaker, time, source);
+
+      if (s.final_reason && transcriptViewMode !== "bubbles") {
+        const reason = document.createElement("span");
+        reason.className = "speakerSource";
+        reason.textContent = s.final_reason;
+        meta.append(reason);
+      }
+
+      const bubble = document.createElement("div");
+      bubble.className = "transcriptBubble";
+      bubble.textContent = s.text;
+
+      entry.append(meta, bubble);
+      return entry;
     })
-    .join("\n");
+  );
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
 
@@ -421,7 +523,8 @@ async function start(): Promise<void> {
   updateLevelStatus("mic", null);
   updateLevelStatus("system", null);
   recvStatsEl.textContent = "0";
-  transcriptEl.textContent = "";
+  transcriptEl.replaceChildren();
+  speakerLegendEl.replaceChildren();
   activeSpeakerStatusEl.textContent = "idle";
   activeSpeakerStatusEl.classList.remove("good", "bad");
   setLastUpdate(null);
@@ -518,8 +621,7 @@ async function start(): Promise<void> {
     } else if (type === "error") {
       const err = msg as ErrorMessage;
       setConnStatus(`Error: ${err.code}`, "bad");
-      const line = `\n[error] ${err.code}: ${err.message}\n`;
-      transcriptEl.textContent = (transcriptEl.textContent ?? "") + line;
+      appendTranscriptNotice(`${err.code}: ${err.message}`, "bad");
     }
   };
 
@@ -572,10 +674,10 @@ async function stop(): Promise<void> {
 
   const suggestedName = `transcript-${session_id}.json`;
   if (!window.audioClient?.saveTranscript) {
-    transcriptEl.textContent =
-      (transcriptEl.textContent ?? "") +
-      "\n[save error] Missing preload bridge (window.audioClient.saveTranscript). " +
-      "The Electron preload script may not be loading.\n";
+    appendTranscriptNotice(
+      "Missing preload bridge (window.audioClient.saveTranscript). The Electron preload script may not be loading.",
+      "bad"
+    );
     return;
   }
 
@@ -585,11 +687,9 @@ async function stop(): Promise<void> {
   });
 
   if (!res.saved && res.error) {
-    transcriptEl.textContent =
-      (transcriptEl.textContent ?? "") + `\n[save error] ${res.error}\n`;
+    appendTranscriptNotice(res.error, "bad");
   } else if (res.saved && res.path) {
-    transcriptEl.textContent =
-      (transcriptEl.textContent ?? "") + `\n[saved] ${res.path}\n`;
+    appendTranscriptNotice(`Saved ${res.path}`);
   }
 }
 
@@ -615,9 +715,13 @@ activeSpeakerBtn.addEventListener("click", () => sendActiveSpeakerOverride());
 activeSpeakerLabelInput.addEventListener("keydown", (ev) => {
   if (ev.key === "Enter") sendActiveSpeakerOverride();
 });
+viewBubblesBtn.addEventListener("click", () => setTranscriptViewMode("bubbles"));
+viewBlocksBtn.addEventListener("click", () => setTranscriptViewMode("blocks"));
+viewScriptBtn.addEventListener("click", () => setTranscriptViewMode("script"));
 
 // Initial state
 sessionIdInput.value = uuidv4();
+setTranscriptViewMode("bubbles");
 setConnStatus("Disconnected");
 updateMicMuteUi();
 updateMicGateStatus(null);

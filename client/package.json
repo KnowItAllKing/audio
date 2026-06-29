@@ -1,7 +1,7 @@
 {
   "name": "audio-client",
   "version": "0.1.0",
-  "description": "Local audio transcription Electron client",
+  "description": "Cadence local transcription Electron client",
   "author": "Local",
   "private": true,
   "type": "module",
@@ -16,7 +16,7 @@
   },
   "build": {
     "appId": "local.audio.transcriber",
-    "productName": "Local Audio Transcriber",
+    "productName": "Cadence",
     "asar": true,
     "npmRebuild": false,
     "directories": {
@@ -34,8 +34,8 @@
       "hardenedRuntime": false,
       "identity": null,
       "extendInfo": {
-        "NSMicrophoneUsageDescription": "Local Audio Transcriber needs microphone access to transcribe local audio.",
-        "NSScreenCaptureDescription": "Local Audio Transcriber may use screen or system audio capture for local meeting transcription."
+        "NSMicrophoneUsageDescription": "Cadence needs microphone access to transcribe local audio.",
+        "NSScreenCaptureDescription": "Cadence may use screen or system audio capture for local meeting transcription."
       }
     }
   },

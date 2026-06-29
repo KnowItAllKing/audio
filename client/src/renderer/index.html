@@ -3,321 +3,1026 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Audio Transcription Client</title>
+    <title>Cadence</title>
     <style>
       :root {
-        --bg: #0b1020;
-        --panel: #121a33;
-        --text: #e8ecff;
-        --muted: #9aa6d6;
-        --border: rgba(255, 255, 255, 0.12);
-        --good: #2dd4bf;
-        --bad: #fb7185;
+        --desktop: #e7e2da;
+        --chrome: #efeae2;
+        --surface: #f4f1ec;
+        --surface-2: #faf7f2;
+        --card: #ffffff;
+        --line: #e7e1d7;
+        --line-strong: #ddd5c8;
+        --text: #221f1a;
+        --text-soft: #6c6659;
+        --muted: #9a948a;
+        --muted-2: #b1aa9c;
+        --green: #2f6f4f;
+        --green-soft: #e9f1ec;
+        --green-line: #cfe2d6;
+        --blue: #3a618c;
+        --blue-soft: #e8eef5;
+        --blue-line: #d3deec;
+        --clay: #b0673c;
+        --clay-soft: #f6e9e0;
+        --clay-line: #ecd7c7;
+        --plum: #7c5b8e;
+        --plum-soft: #efe9f3;
+        --plum-line: #e1d6ea;
+        --warn: #9a6e22;
+        --warn-soft: #f9f1de;
+        --bad: #b0492a;
+        --bad-soft: #fbeee8;
+        --shadow: 0 24px 60px rgba(40, 33, 24, 0.2), 0 2px 6px rgba(40, 33, 24, 0.1);
       }
+
+      * {
+        box-sizing: border-box;
+      }
+
       html,
       body {
         margin: 0;
+        min-height: 100%;
+        background: var(--desktop);
+        color: var(--text);
+        font-family: "Avenir Next", "Hanken Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      body {
+        min-height: 100vh;
         padding: 0;
-        height: 100%;
-        background: var(--bg);
-        color: var(--text);
-        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
-          Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
       }
-      .app {
-        display: grid;
-        grid-template-rows: auto auto 1fr auto;
-        gap: 12px;
-        padding: 18px;
-        height: 100%;
-        box-sizing: border-box;
-        overflow: hidden;
-      }
-      .header {
-        display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-      }
-      .title {
-        font-size: 20px;
-        font-weight: 650;
-      }
-      .subtle {
-        color: var(--muted);
-        font-size: 12px;
-      }
-      .panel {
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        padding: 12px;
-      }
-      .grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 12px;
-      }
-      label {
-        display: block;
-        font-size: 12px;
-        color: var(--muted);
-        margin-bottom: 6px;
-      }
+
+      button,
       input,
-      select,
-      button {
-        width: 100%;
-        box-sizing: border-box;
-        padding: 10px 10px;
-        border-radius: 10px;
-        border: 1px solid var(--border);
-        background: rgba(255, 255, 255, 0.06);
-        color: var(--text);
-        outline: none;
+      select {
+        font: inherit;
       }
+
       button {
         cursor: pointer;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 7px;
+        color: var(--text-soft);
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      input[type="text"],
+      select {
+        width: 100%;
+        height: 38px;
+        border: 1px solid #e0d9cd;
+        border-radius: 8px;
+        background: var(--surface-2);
+        color: var(--text);
+        outline: none;
+        padding: 0 11px;
+        font-size: 13px;
+      }
+
+      input[type="text"]:focus,
+      select:focus {
+        border-color: var(--green-line);
+        box-shadow: 0 0 0 3px rgba(47, 111, 79, 0.1);
+      }
+
+      input[type="range"] {
+        width: 100%;
+        appearance: none;
+        height: 4px;
+        border-radius: 4px;
+        background: #e2dccf;
+        outline: none;
+      }
+
+      input[type="range"]::-webkit-slider-thumb {
+        appearance: none;
+        width: 15px;
+        height: 15px;
+        border: 2px solid #fff;
+        border-radius: 50%;
+        background: var(--green);
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+      }
+
+      ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+
+      ::-webkit-scrollbar-thumb {
+        border: 3px solid transparent;
+        border-radius: 8px;
+        background: var(--line-strong);
+        background-clip: content-box;
+      }
+
+      @keyframes meterPulse {
+        0%,
+        100% {
+          opacity: 0.65;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+
+      .app {
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        height: 100vh;
+        min-height: 0;
+        overflow: hidden;
+        background: var(--surface);
+      }
+
+      .appHeader {
+        flex: none;
+        min-height: 58px;
+        display: grid;
+        grid-template-columns: minmax(220px, 1fr) auto auto;
+        align-items: center;
+        gap: 12px;
+        padding: 11px 24px;
+        border-bottom: 1px solid #e3ddd2;
+        background: #f7f4ef;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        min-width: 0;
+      }
+
+      .mark {
+        width: 18px;
+        height: 18px;
+        display: grid;
+        place-items: center;
+        border-radius: 5px;
+        background: var(--green);
+      }
+
+      .mark::after {
+        content: "";
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #fff;
+      }
+
+      .brandName {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        min-width: 0;
+      }
+
+      .brandName strong {
+        color: var(--text);
+        font-size: 17px;
+        letter-spacing: 0;
+        line-height: 1.1;
+      }
+
+      .brandName span {
+        color: #a39c8f;
+        font-size: 12px;
         font-weight: 600;
       }
-      button.primary {
-        border-color: rgba(45, 212, 191, 0.5);
-        background: rgba(45, 212, 191, 0.15);
-      }
-      button.danger {
-        border-color: rgba(251, 113, 133, 0.55);
-        background: rgba(251, 113, 133, 0.12);
-      }
-      input[type="checkbox"] {
-        width: auto;
-      }
-      input[type="range"] {
-        padding: 10px 0;
-      }
-      .inlineControl {
-        min-height: 41px;
+
+      .topStatus {
+        justify-self: end;
         display: flex;
         align-items: center;
         gap: 8px;
-        box-sizing: border-box;
-        padding: 9px 10px;
-        border-radius: 10px;
-        border: 1px solid var(--border);
-        background: rgba(255, 255, 255, 0.06);
+        min-width: 0;
       }
-      .meter {
-        height: 8px;
-        overflow: hidden;
-        border-radius: 999px;
-        background: rgba(255, 255, 255, 0.08);
+
+      .topStats {
+        justify-self: end;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+      }
+
+      .workspace {
         flex: 1;
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(320px, 372px) minmax(0, 1fr);
       }
+
+      .rail {
+        min-height: 0;
+        overflow: auto;
+        padding: 24px;
+        border-right: 1px solid var(--line);
+        background: #f7f4ef;
+      }
+
+      .railHeader {
+        margin-bottom: 18px;
+      }
+
+      .eyebrow {
+        color: var(--green);
+        font-size: 11px;
+        font-weight: 750;
+        letter-spacing: 0;
+        text-transform: uppercase;
+      }
+
+      .railTitle {
+        margin: 5px 0 0;
+        color: var(--text);
+        font-size: 24px;
+        line-height: 1.12;
+        letter-spacing: 0;
+      }
+
+      .sourceCard,
+      .sessionCard {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--card);
+        padding: 17px 18px;
+      }
+
+      .sourceCard + .sourceCard,
+      .sessionCard {
+        margin-top: 14px;
+      }
+
+      .cardHead {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 15px;
+      }
+
+      .sourceName {
+        display: flex;
+        gap: 13px;
+        align-items: flex-start;
+      }
+
+      .sourceIcon {
+        flex: none;
+        width: 38px;
+        height: 38px;
+        display: grid;
+        place-items: center;
+        border-radius: 8px;
+      }
+
+      .sourceIcon.mic {
+        background: var(--green-soft);
+      }
+
+      .sourceIcon.mic::after {
+        content: "";
+        width: 11px;
+        height: 17px;
+        border-radius: 7px;
+        background: var(--green);
+      }
+
+      .sourceIcon.system {
+        background: var(--blue-soft);
+      }
+
+      .sourceIcon.system::after {
+        content: "";
+        width: 17px;
+        height: 17px;
+        border: 2px solid var(--blue);
+        border-radius: 50%;
+        box-shadow: 6px 0 0 -3px var(--blue);
+      }
+
+      .sourceTitle {
+        color: var(--text);
+        font-size: 15px;
+        font-weight: 700;
+      }
+
+      .sourceSub {
+        margin-top: 1px;
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+
+      .controlGroup + .controlGroup {
+        margin-top: 14px;
+      }
+
+      .splitControl {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .buttonRow {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+
+      .buttonRow.three {
+        grid-template-columns: 1fr 1fr 1fr;
+      }
+
+      .actionButton {
+        min-height: 38px;
+        border: 1px solid #e0d9cd;
+        border-radius: 8px;
+        background: #fff;
+        color: var(--text-soft);
+        font-size: 13px;
+        font-weight: 750;
+      }
+
+      .actionButton:hover {
+        border-color: var(--green-line);
+        color: var(--green);
+      }
+
+      button.primary,
+      .actionButton.primary {
+        border-color: var(--green);
+        background: var(--green);
+        color: #fff;
+      }
+
+      button.danger,
+      .actionButton.danger {
+        border-color: #e9c7bb;
+        background: var(--bad-soft);
+        color: var(--bad);
+      }
+
+      button:disabled {
+        cursor: default;
+        opacity: 0.52;
+      }
+
+      .toggleLine {
+        min-height: 35px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .toggleLine span {
+        color: var(--text-soft);
+        font-size: 13px;
+        font-weight: 650;
+      }
+
+      .toggleLine input {
+        position: absolute;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .switchTrack {
+        flex: none;
+        width: 40px;
+        height: 23px;
+        border-radius: 20px;
+        background: #dcd5c8;
+        padding: 2px;
+        transition: background 0.15s;
+      }
+
+      .switchTrack::after {
+        content: "";
+        display: block;
+        width: 19px;
+        height: 19px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+        transition: transform 0.15s;
+      }
+
+      .toggleLine input:checked + .switchTrack {
+        background: var(--green);
+      }
+
+      .toggleLine input:checked + .switchTrack::after {
+        transform: translateX(17px);
+      }
+
+      .meterWrap {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .meter {
+        flex: 1;
+        height: 7px;
+        overflow: hidden;
+        border-radius: 7px;
+        background: #ece6dc;
+      }
+
       .meterFill {
         width: 0%;
         height: 100%;
         border-radius: inherit;
-        background: var(--good);
+        background: var(--green);
         transition: width 80ms linear;
       }
-      .row {
-        display: grid;
-        grid-template-columns: 1fr 1fr 1fr;
-        gap: 12px;
-        align-items: end;
+
+      #sysMeterFill {
+        background: var(--blue);
       }
-      .transcript {
-        min-height: 0;
-        overflow-y: auto;
-        padding: 12px;
-        background: rgba(0, 0, 0, 0.25);
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-          "Liberation Mono", "Courier New", monospace;
-        font-size: 12px;
-        white-space: pre-wrap;
-      }
-      .statusbar {
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
-        color: var(--muted);
-        font-size: 12px;
-      }
+
       .pill {
-        padding: 2px 8px;
-        border-radius: 999px;
-        border: 1px solid var(--border);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 23px;
+        padding: 3px 9px;
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: #fff;
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 11px;
+        line-height: 1.2;
+        white-space: nowrap;
       }
+
       .pill.good {
-        color: var(--good);
-        border-color: rgba(45, 212, 191, 0.35);
+        border-color: var(--green-line);
+        background: #e8f0ea;
+        color: var(--green);
       }
+
       .pill.bad {
+        border-color: #eccdbf;
+        background: var(--bad-soft);
         color: var(--bad);
-        border-color: rgba(251, 113, 133, 0.45);
       }
-      .wide {
-        grid-column: 1 / -1;
+
+      .advancedControls {
+        margin-top: 14px;
+        border-top: 1px solid #f1ece3;
+        padding-top: 12px;
       }
-      details.advancedControls {
-        margin-top: 12px;
-      }
-      details.advancedControls > summary {
+
+      .advancedControls > summary {
         cursor: pointer;
         color: var(--muted);
         font-size: 12px;
+        font-weight: 700;
       }
-      details.advancedControls[open] > summary {
-        margin-bottom: 12px;
+
+      .advancedControls[open] > summary {
+        margin-bottom: 14px;
+      }
+
+      .advancedGrid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+
+      .advancedTwo {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+
+      .mainPane {
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        background: var(--surface);
+      }
+
+      .transcriptHeader {
+        flex: none;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 18px;
+        padding: 20px 30px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .sessionTitle {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .sessionTitle input {
+        height: auto;
+        border: 0;
+        background: transparent;
+        padding: 0;
+        color: var(--text);
+        font-size: 22px;
+        font-weight: 750;
+        letter-spacing: 0;
+      }
+
+      .sessionTitle input:focus {
+        box-shadow: none;
+      }
+
+      .sessionMeta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .speakerLegend {
+        flex: none;
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .speakerLegend:empty {
+        display: none;
+      }
+
+      .legendChip {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 9px;
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: #fff;
+        color: var(--speaker-color, var(--text-soft));
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .legendDot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: currentColor;
+      }
+
+      .transcriptTools {
+        flex: none;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 30px;
+        border-bottom: 1px solid var(--line);
+        background: #f7f4ef;
+      }
+
+      .toolStat {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .viewButton {
+        min-height: 27px;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: var(--muted);
+        padding: 5px 13px;
+        font-size: 12px;
+        font-weight: 750;
+      }
+
+      .viewButton.active {
+        background: #fff;
+        color: var(--green);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+      }
+
+      .transcript {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        padding: 26px 30px;
+      }
+
+      .transcript:empty::before {
+        content: "No transcript yet.";
+        display: grid;
+        place-items: center;
+        min-height: 100%;
+        color: var(--muted-2);
+        font-size: 14px;
+      }
+
+      .transcriptEntry {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        max-width: 760px;
+        margin: 0 auto 16px;
+        animation: rise 0.18s ease-out;
+      }
+
+      .transcriptEntry.tone-you {
+        align-items: flex-end;
+      }
+
+      .speakerMeta {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        color: var(--muted-2);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 10.5px;
+      }
+
+      .tone-you .speakerMeta {
+        flex-direction: row-reverse;
+      }
+
+      .speakerName {
+        color: var(--speaker-color, var(--green));
+        font-family: "Avenir Next", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 12.5px;
+        font-weight: 800;
+      }
+
+      .speakerSource {
+        color: var(--muted);
+      }
+
+      .transcriptBubble {
+        max-width: 78%;
+        padding: 10px 15px;
+        border: 1px solid var(--speaker-line, var(--green-line));
+        border-radius: 15px;
+        border-bottom-left-radius: 5px;
+        background: var(--speaker-bg, var(--green-soft));
+        color: #241f18;
+        font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+        font-size: 16.5px;
+        line-height: 1.5;
+      }
+
+      .tone-you .transcriptBubble {
+        border-bottom-right-radius: 5px;
+        border-bottom-left-radius: 15px;
+      }
+
+      .transcriptEntry.isPartial .transcriptBubble::after {
+        content: " ...";
+        color: var(--muted);
+      }
+
+      .tone-you {
+        --speaker-color: var(--green);
+        --speaker-bg: var(--green-soft);
+        --speaker-line: var(--green-line);
+      }
+
+      .tone-system {
+        --speaker-color: var(--blue);
+        --speaker-bg: var(--blue-soft);
+        --speaker-line: var(--blue-line);
+      }
+
+      .tone-a {
+        --speaker-color: var(--blue);
+        --speaker-bg: var(--blue-soft);
+        --speaker-line: var(--blue-line);
+      }
+
+      .tone-b {
+        --speaker-color: var(--clay);
+        --speaker-bg: var(--clay-soft);
+        --speaker-line: var(--clay-line);
+      }
+
+      .tone-c {
+        --speaker-color: var(--plum);
+        --speaker-bg: var(--plum-soft);
+        --speaker-line: var(--plum-line);
+      }
+
+      .transcript.view-blocks .transcriptEntry,
+      .transcript.view-script .transcriptEntry {
+        align-items: stretch;
+      }
+
+      .transcript.view-blocks .speakerMeta,
+      .transcript.view-script .speakerMeta {
+        flex-direction: row;
+      }
+
+      .transcript.view-blocks .transcriptBubble {
+        max-width: none;
+        border-radius: 8px;
+        border-left: 4px solid var(--speaker-color);
+        background: #fff;
+      }
+
+      .transcript.view-script .transcriptBubble {
+        max-width: none;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        padding: 0;
+        font-size: 18px;
+      }
+
+      .noticeLine {
+        max-width: 760px;
+        margin: 0 auto 12px;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+        color: var(--text-soft);
+        font-size: 12px;
+      }
+
+      .noticeLine.bad {
+        border-color: #eccdbf;
+        background: var(--bad-soft);
+        color: var(--bad);
+      }
+
+      @keyframes rise {
+        from {
+          opacity: 0;
+          transform: translateY(7px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+
+      .footerBar {
+        flex: none;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 30px;
+        border-top: 1px solid var(--line);
+        background: #f7f4ef;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      @media (max-width: 920px) {
+        body {
+          padding: 0;
+        }
+
+        .app {
+          min-height: 0;
+        }
+
+        .appHeader {
+          grid-template-columns: 1fr auto;
+          height: auto;
+          align-items: center;
+          gap: 8px 10px;
+          padding: 10px 18px;
+        }
+
+        .brandName span {
+          display: none;
+        }
+
+        .topStatus {
+          justify-self: end;
+          flex-wrap: wrap;
+        }
+
+        .topStats {
+          grid-column: 1 / -1;
+          justify-self: start;
+          flex-wrap: wrap;
+        }
+
+        .workspace {
+          display: flex;
+          flex-direction: column;
+          overflow: auto;
+        }
+
+        .rail {
+          flex: none;
+          overflow: visible;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+          padding: 24px 18px;
+        }
+
+        .mainPane {
+          flex: none;
+          min-height: 640px;
+        }
+
+        .transcriptHeader {
+          align-items: flex-start;
+          gap: 12px;
+        }
+
+        .sessionTitle,
+        .speakerLegend {
+          flex-basis: 100%;
+        }
+
+        .speakerLegend {
+          justify-content: flex-start;
+        }
+
+        .transcript {
+          min-height: 420px;
+        }
+
+        .transcriptHeader,
+        .transcriptTools,
+        .footerBar {
+          padding-left: 18px;
+          padding-right: 18px;
+        }
       }
     </style>
   </head>
   <body>
+    <input id="wsUrl" type="hidden" value="ws://localhost:8765" />
+    <input id="sessionId" type="hidden" />
     <div class="app">
-      <div class="header">
-        <div>
-          <div class="title">Audio Transcription Client</div>
-          <div class="subtle">Streams mic + “system” (selected input device) over WebSockets.</div>
-        </div>
-        <div class="subtle">Phase 4</div>
-      </div>
-
-      <div class="panel">
-        <div class="grid">
-          <div>
-            <label for="wsUrl">WebSocket URL</label>
-            <input id="wsUrl" type="text" value="ws://localhost:8765" />
-          </div>
-          <div>
-            <label for="sessionId">Session ID</label>
-            <input id="sessionId" type="text" />
+      <header class="appHeader">
+        <div class="brand">
+          <div class="mark" aria-hidden="true"></div>
+          <div class="brandName">
+            <strong>Cadence</strong>
+            <span>local transcript</span>
           </div>
         </div>
-
-        <div style="height: 12px"></div>
-
-        <div class="grid">
-          <div>
-            <label for="micSelect">Mic device</label>
-            <select id="micSelect"></select>
-          </div>
-          <div>
-            <label for="sysSelect">System device (virtual input)</label>
-            <select id="sysSelect"></select>
-          </div>
-        </div>
-
-        <div style="height: 12px"></div>
-
-        <div class="grid">
-          <div>
-            <label for="micMuteBtn">Mic mute</label>
-            <button id="micMuteBtn" class="primary" type="button">Mute mic</button>
-          </div>
-          <div>
-            <label for="micFilterEnabled">Mic garbage filter</label>
-            <div class="inlineControl">
-              <input id="micFilterEnabled" type="checkbox" checked />
-              <span class="subtle">Enabled</span>
-            </div>
-          </div>
-        </div>
-
-        <div style="height: 12px"></div>
-
-        <div class="grid">
-          <div>
-            <label for="micGateThreshold">Mic gate threshold</label>
-            <input id="micGateThreshold" type="range" min="0.001" max="0.05" step="0.001" value="0.012" />
-          </div>
-          <div>
-            <label for="micGateStatus">Mic gate status</label>
-            <div class="inlineControl">
-              <span id="micGateStatus" class="pill">idle</span>
-            </div>
-          </div>
-        </div>
-
-        <div style="height: 12px"></div>
-
-        <div class="grid">
-          <div>
-            <label for="micLevelStatus">Mic level</label>
-            <div class="inlineControl">
-              <div class="meter"><div id="micMeterFill" class="meterFill"></div></div>
-              <span id="micLevelStatus" class="pill">idle</span>
-            </div>
-          </div>
-          <div>
-            <label for="sysLevelStatus">System level</label>
-            <div class="inlineControl">
-              <div class="meter"><div id="sysMeterFill" class="meterFill"></div></div>
-              <span id="sysLevelStatus" class="pill">idle</span>
-            </div>
-          </div>
-        </div>
-
-        <div style="height: 12px"></div>
-
-        <details class="advancedControls">
-          <summary>Advanced speaker labels</summary>
-          <div class="grid">
-            <div>
-              <label for="micLabel">Mic speaker label</label>
-              <input id="micLabel" type="text" value="You" />
-            </div>
-            <div>
-              <label for="sysLabel">System fallback label</label>
-              <input id="sysLabel" type="text" value="System audio" />
-            </div>
-          </div>
-
-          <div style="height: 12px"></div>
-
-          <div class="grid">
-            <div>
-              <label for="activeSpeakerLabel">Current Zoom speaker</label>
-              <input id="activeSpeakerLabel" type="text" placeholder="Name" />
-            </div>
-            <div>
-              <label for="activeSpeakerBtn">Speaker label</label>
-              <button id="activeSpeakerBtn" type="button">Set active speaker</button>
-            </div>
-            <div class="wide">
-              <div class="inlineControl">
-                <span id="activeSpeakerStatus" class="pill">idle</span>
-              </div>
-            </div>
-          </div>
-        </details>
-
-        <div style="height: 12px"></div>
-
-        <div class="row">
-          <button id="refreshBtn">Refresh devices</button>
-          <button id="startBtn" class="primary">Connect &amp; Start</button>
-          <button id="stopBtn" class="danger" disabled>Stop</button>
-        </div>
-      </div>
-
-      <div class="panel" style="display: grid; grid-template-rows: auto 1fr; gap: 10px; min-height: 0; overflow: hidden">
-        <div class="subtle">Transcript</div>
-        <div id="transcript" class="transcript"></div>
-      </div>
-
-      <div class="statusbar">
-        <div>
-          Connection:
+        <div class="topStatus">
           <span id="connStatus" class="pill">Disconnected</span>
-          <span style="margin-left: 8px">Last update:</span>
           <span id="lastUpdate" class="pill">—</span>
         </div>
-        <div>
-          Sent:
+        <div class="topStats">
           <span id="sentStats" class="pill">mic=0 sys=0</span>
-          <span style="margin-left: 8px">Received:</span>
           <span id="recvStats" class="pill">0</span>
         </div>
+      </header>
+
+      <div class="workspace">
+        <aside class="rail">
+          <div class="railHeader">
+            <div class="eyebrow">New session</div>
+            <h1 class="railTitle">Audio setup</h1>
+          </div>
+
+          <section class="sessionCard">
+            <div class="buttonRow three">
+              <button id="refreshBtn" class="actionButton" type="button">Refresh</button>
+              <button id="startBtn" class="actionButton primary" type="button">Start</button>
+              <button id="stopBtn" class="actionButton danger" type="button" disabled>Stop</button>
+            </div>
+
+            <details class="advancedControls">
+              <summary>Advanced</summary>
+              <div class="advancedGrid">
+                <div class="advancedTwo">
+                  <div>
+                    <label for="micLabel">Mic label</label>
+                    <input id="micLabel" type="text" value="You" />
+                  </div>
+                  <div>
+                    <label for="sysLabel">System label</label>
+                    <input id="sysLabel" type="text" value="System audio" />
+                  </div>
+                </div>
+                <div>
+                  <label for="activeSpeakerLabel">Current speaker</label>
+                  <input id="activeSpeakerLabel" type="text" placeholder="Name" />
+                </div>
+                <div class="splitControl">
+                  <button id="activeSpeakerBtn" class="actionButton" type="button">Set speaker</button>
+                  <span id="activeSpeakerStatus" class="pill">idle</span>
+                </div>
+              </div>
+            </details>
+          </section>
+
+          <section class="sourceCard">
+            <div class="cardHead">
+              <div class="sourceName">
+                <div class="sourceIcon mic" aria-hidden="true"></div>
+                <div>
+                  <div class="sourceTitle">Your microphone</div>
+                  <div class="sourceSub">Microphone</div>
+                </div>
+              </div>
+              <span id="micLevelStatus" class="pill">idle</span>
+            </div>
+
+            <div class="controlGroup">
+              <label for="micSelect">Device</label>
+              <select id="micSelect"></select>
+            </div>
+
+            <div class="controlGroup meterWrap">
+              <div class="meter"><div id="micMeterFill" class="meterFill"></div></div>
+            </div>
+
+            <div class="controlGroup splitControl">
+              <button id="micMuteBtn" class="actionButton primary" type="button">Mute mic</button>
+              <span id="micGateStatus" class="pill">idle</span>
+            </div>
+
+            <div class="controlGroup">
+              <label class="toggleLine" for="micFilterEnabled">
+                <span>Quiet filter</span>
+                <input id="micFilterEnabled" type="checkbox" checked />
+                <i class="switchTrack" aria-hidden="true"></i>
+              </label>
+            </div>
+
+            <div class="controlGroup">
+              <label for="micGateThreshold">Sensitivity</label>
+              <input id="micGateThreshold" type="range" min="0.001" max="0.05" step="0.001" value="0.012" />
+            </div>
+          </section>
+
+          <section class="sourceCard">
+            <div class="cardHead">
+              <div class="sourceName">
+                <div class="sourceIcon system" aria-hidden="true"></div>
+                <div>
+                  <div class="sourceTitle">Meeting audio</div>
+                  <div class="sourceSub">System input</div>
+                </div>
+              </div>
+              <span id="sysLevelStatus" class="pill">idle</span>
+            </div>
+
+            <div class="controlGroup">
+              <label for="sysSelect">Source</label>
+              <select id="sysSelect"></select>
+            </div>
+
+            <div class="controlGroup meterWrap">
+              <div class="meter"><div id="sysMeterFill" class="meterFill"></div></div>
+            </div>
+          </section>
+
+        </aside>
+
+        <main class="mainPane">
+          <div class="transcriptHeader">
+            <div class="sessionTitle">
+              <input id="sessionTitle" type="text" value="Live transcript" aria-label="Session title" />
+            </div>
+            <div id="speakerLegend" class="speakerLegend" aria-label="Speaker color legend"></div>
+          </div>
+
+          <div class="transcriptTools">
+            <div class="toolStat" aria-label="Transcript view">
+              <button id="viewBubblesBtn" class="viewButton active" type="button">Bubbles</button>
+              <button id="viewBlocksBtn" class="viewButton" type="button">Blocks</button>
+              <button id="viewScriptBtn" class="viewButton" type="button">Script</button>
+            </div>
+          </div>
+
+          <div id="transcript" class="transcript"></div>
+
+          <div class="footerBar">
+            <span>Stored locally</span>
+            <span>Raw audio off</span>
+          </div>
+        </main>
       </div>
     </div>
 
