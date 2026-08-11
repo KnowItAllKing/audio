@@ -8,7 +8,6 @@ Use this when you cannot create or authorize a Zoom RTMS app.
 Zoom speaker output -> virtual loopback input -> system stream
 Your microphone -> mic stream
 Local diarization -> Speaker 1 / Speaker 2 labels
-Optional manual current speaker label -> speaker_activity
 Whisper -> phrase transcript
 ```
 
@@ -23,7 +22,6 @@ Whisper -> phrase transcript
 5. In this app:
    - Mic device: your real mic
    - System device: the loopback device
-   - System fallback label: `Zoom audio`
 6. Click Connect & Start.
 7. Confirm System level moves when someone in Zoom talks.
 
@@ -54,15 +52,6 @@ The default four-second diarization lag gives the model some future context for
 better turn boundaries. Increase `DIARIZATION_LAG_SEC` when accuracy matters
 more than latency, or reduce it for faster partial labels.
 
-Manual labels are in the app's advanced speaker-label controls. Use them only
-when you want known names instead of anonymous labels:
-
-1. Type the visible speaker name.
-2. Click Set active speaker, or press Enter.
-3. System transcript phrases after that point use that label until changed.
-
-Manual labels beat diarization labels.
-
 After a meeting, use Speaker memory to play short diarized clips and name them.
 Saved names can be matched automatically in later meetings when confidence is
 high enough. Persisted voice fingerprints live in the client; the server keeps
@@ -77,12 +66,10 @@ anonymous.
 - Transcript lines with `[system]` use `Speaker 1`, `Speaker 2`, etc.
 - Speaker memory can replay short clips and save local names after the session.
 - Persisted voice fingerprints live in the client, not the server.
-- Manual advanced labels override anonymous diarization labels when set.
 - Pause between phrases creates separate final transcript lines.
 
 ## Limits
 
 - Mixed system audio cannot be perfectly split by Zoom participant without RTMS.
-- Manual speaker labels are best-effort timing hints.
 - Diarization still needs manual name mapping because Zoom names are not
   available locally.

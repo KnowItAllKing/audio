@@ -36,14 +36,6 @@ export function chooseLikelyMicDevice<T extends AudioInputDeviceLike>(
   });
 }
 
-export function speakerIdFromLabel(label: string): string {
-  const slug = normalizeLabel(label)
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-  return `manual:${slug || "unknown"}`;
-}
-
 function normalizeLabel(label: string): string {
   return label.trim().toLowerCase();
 }

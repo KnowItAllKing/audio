@@ -3,8 +3,7 @@ import assert from "node:assert/strict";
 import {
   chooseLikelyLoopbackDevice,
   chooseLikelyMicDevice,
-  isLikelyLoopbackDevice,
-  speakerIdFromLabel
+  isLikelyLoopbackDevice
 } from "./LoopbackDevice";
 
 const devices = [
@@ -21,6 +20,3 @@ assert.equal(isLikelyLoopbackDevice({ deviceId: "empty", label: "" }), false);
 assert.equal(chooseLikelyLoopbackDevice(devices)?.deviceId, "blackhole");
 assert.equal(chooseLikelyMicDevice(devices, "blackhole")?.deviceId, "default");
 assert.equal(chooseLikelyMicDevice([devices[1]], "blackhole"), undefined);
-
-assert.equal(speakerIdFromLabel("Taylor Smith"), "manual:taylor-smith");
-assert.equal(speakerIdFromLabel("  "), "manual:unknown");

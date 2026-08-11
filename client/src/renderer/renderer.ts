@@ -1,8 +1,7 @@
 import { AudioStreamSender, type StreamId } from "./audio/AudioStreamSender";
 import {
   chooseLikelyLoopbackDevice,
-  chooseLikelyMicDevice,
-  speakerIdFromLabel
+  chooseLikelyMicDevice
 } from "./audio/LoopbackDevice";
 import { MicInputFilter, getAudioStats, type MicInputFilterDecision } from "./audio/MicInputFilter";
 import {
@@ -90,10 +89,7 @@ type ControlMessage = {
   type: "control";
   session_id: string;
   command:
-    | "metadata"
-    | "speaker_activity"
     | "stop"
-    | "ping"
     | "speaker_memory_review"
     | "speaker_memory_enroll"
     | "speaker_memory_profiles";
@@ -116,11 +112,6 @@ const wsUrlInput = $<HTMLInputElement>("wsUrl");
 const sessionIdInput = $<HTMLInputElement>("sessionId");
 const micSelect = $<HTMLSelectElement>("micSelect");
 const sysSelect = $<HTMLSelectElement>("sysSelect");
-const micLabelInput = $<HTMLInputElement>("micLabel");
-const sysLabelInput = $<HTMLInputElement>("sysLabel");
-const activeSpeakerLabelInput = $<HTMLInputElement>("activeSpeakerLabel");
-const activeSpeakerBtn = $<HTMLButtonElement>("activeSpeakerBtn");
-const activeSpeakerStatusEl = $<HTMLSpanElement>("activeSpeakerStatus");
 const micMuteBtn = $<HTMLButtonElement>("micMuteBtn");
 const micFilterEnabledInput = $<HTMLInputElement>("micFilterEnabled");
 const micGateThresholdInput = $<HTMLInputElement>("micGateThreshold");
@@ -372,53 +363,6 @@ function storeSpeakerMemoryProfiles(profiles: SpeakerMemoryProfile[]): SpeakerMe
   const saved = saveSpeakerMemoryProfiles(profiles);
   updateSpeakerMemoryStatus(saved);
   return saved;
-}
-
-function sendSpeakerMetadata(): void {
-  const micLabel = micLabelInput.value.trim() || "You";
-  const sysLabel = sysLabelInput.value.trim() || "System audio";
-  sendControl("metadata", {
-    stream_speakers: {
-      mic: {
-        speaker_id: "local:mic",
-        speaker_label: micLabel,
-        speaker_source: "manual",
-        speaker_confidence: 0.9
-      },
-      system: {
-        speaker_id: "system:unknown",
-        speaker_label: sysLabel,
-        speaker_source: "manual",
-        speaker_confidence: 0.5
-      }
-    }
-  });
-}
-
-function sendActiveSpeakerOverride(): void {
-  const label = activeSpeakerLabelInput.value.trim();
-  if (!label) {
-    activeSpeakerStatusEl.textContent = "idle";
-    activeSpeakerStatusEl.classList.remove("good", "bad");
-    return;
-  }
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    activeSpeakerStatusEl.textContent = "not connected";
-    activeSpeakerStatusEl.classList.add("bad");
-    activeSpeakerStatusEl.classList.remove("good");
-    return;
-  }
-  sendControl("speaker_activity", {
-    stream_id: "system",
-    speaker_id: speakerIdFromLabel(label),
-    speaker_label: label,
-    speaker_source: "manual",
-    speaker_confidence: 0.8,
-    start_timestamp_ms: Date.now()
-  });
-  activeSpeakerStatusEl.textContent = label;
-  activeSpeakerStatusEl.classList.add("good");
-  activeSpeakerStatusEl.classList.remove("bad");
 }
 
 function updateSentStats(): void {
@@ -1339,8 +1283,6 @@ async function start(): Promise<void> {
   speakerLegendEl.replaceChildren();
   speakerReviewListEl.replaceChildren();
   updateSpeakerMemoryStatus(loadSpeakerMemoryProfiles());
-  activeSpeakerStatusEl.textContent = "idle";
-  activeSpeakerStatusEl.classList.remove("good", "bad");
   setLastUpdate(null);
 
   startedAt = Date.now();
@@ -1354,7 +1296,6 @@ async function start(): Promise<void> {
     startBtn.disabled = true;
     stopBtn.disabled = false;
     syncSpeakerMemoryProfiles();
-    sendSpeakerMetadata();
 
     await replaceStreamCapture("mic", micSelect.value, false);
     await replaceStreamCapture("system", sysSelect.value, false);
@@ -1517,10 +1458,6 @@ micFilterEnabledInput.addEventListener("change", () => {
 micGateThresholdInput.addEventListener("input", () => {
   micInputFilter.reset();
   updateMicGateStatus(null);
-});
-activeSpeakerBtn.addEventListener("click", () => sendActiveSpeakerOverride());
-activeSpeakerLabelInput.addEventListener("keydown", (ev) => {
-  if (ev.key === "Enter") sendActiveSpeakerOverride();
 });
 viewBubblesBtn.addEventListener("click", () => setTranscriptViewMode("bubbles"));
 viewBlocksBtn.addEventListener("click", () => setTranscriptViewMode("blocks"));

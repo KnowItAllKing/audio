@@ -529,12 +529,6 @@
         gap: 12px;
       }
 
-      .advancedTwo {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 12px;
-      }
-
       .memoryList {
         display: grid;
         gap: 10px;
@@ -1511,24 +1505,6 @@
                 <div>
                   <label for="wsUrl">Server endpoint</label>
                   <input id="wsUrl" type="text" value="ws://localhost:8765" autocomplete="off" spellcheck="false" />
-                </div>
-                <div class="advancedTwo">
-                  <div>
-                    <label for="micLabel">Mic label</label>
-                    <input id="micLabel" type="text" value="You" />
-                  </div>
-                  <div>
-                    <label for="sysLabel">System label</label>
-                    <input id="sysLabel" type="text" value="System audio" />
-                  </div>
-                </div>
-                <div>
-                  <label for="activeSpeakerLabel">Current speaker</label>
-                  <input id="activeSpeakerLabel" type="text" placeholder="Name" />
-                </div>
-                <div class="splitControl">
-                  <button id="activeSpeakerBtn" class="actionButton" type="button">Set speaker</button>
-                  <span id="activeSpeakerStatus" class="pill">idle</span>
                 </div>
               </div>
             </details>

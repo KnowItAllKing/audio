@@ -120,8 +120,8 @@ The protocol separates audio source tags from speaker identity:
 - `speaker_source`: `manual`, `stream`, `zoom`, `diarization`, `memory`, or `unknown`
 
 Without Zoom metadata or diarization, mic defaults to `You` and system audio
-defaults to `System audio`. The Electron client sends editable local labels and
-can send manual current-speaker activity for app-independent Zoom mode.
+defaults to `System audio`. The Electron client relies on server-provided
+speaker identities and does not override diarization labels.
 
 ### Speaker diarization
 
