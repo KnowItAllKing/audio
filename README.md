@@ -45,7 +45,10 @@ uv sync --project server --extra dev
 # Optional: WS_PORT=8765 (default)
 # Transcription scheduling knobs:
 #   TRANSCRIBE_INTERVAL_SEC=1.0
-#   MIN_NEW_AUDIO_SEC=2.0
+#   MIN_NEW_AUDIO_SEC=2.0              (raw ASR window threshold)
+#   RAW_TRANSCRIPT_IDLE_FLUSH_SEC=0.8  (flush a short phrase after input goes quiet)
+#   PROCESSED_TRANSCRIPT_LAG_SEC=3.0   (cleanup/future-context delay)
+#   PROCESSED_MIN_NEW_AUDIO_SEC=2.0
 #   WINDOW_SEC=8.0
 #   MAX_BUFFER_SEC=600.0
 # Utterance grouping knobs:
@@ -79,6 +82,37 @@ The server runs an always-on VAD gate to avoid transcribing near-silence (reduce
 
 ### Speaker labels and utterances
 
+Cadence exposes two transcript layers without transcribing the same audio
+twice:
+
+- **Raw** publishes each Whisper window immediately with source-level labels.
+- **Processed** reuses that ASR result after a short lag, applies future-context
+  diarization, splits at word-level speaker changes, and joins fragments into
+  phrases. This is the canonical saved transcript.
+
+Saved JSON keeps the processed layer in `segments` for compatibility and also
+includes the immediate layer in `raw_segments`. PCM audio is not saved.
+When the microphone hears the same meeting audio as the system loopback,
+the client reconciles time-aligned matching text so the dialogue is shown and
+saved once; later repetition and different simultaneous speech remain separate.
+Use **Copy clean** in the Electron client to copy the Processed transcript as
+plain speaker turns (`Name: dialogue`) with no timestamps, IDs, or JSON fields.
+
+### AI Q&A threads
+
+The Electron client can open persistent transcript Q&A tabs backed by an
+installed `codex` or `claude` CLI. Choose a provider and optional model, start a
+thread, and ask a question; Cadence sends the same clean Processed transcript
+used by **Copy clean**. Later questions resume the provider thread and only send
+the transcript again when the Processed snapshot changes. **Sync transcript**
+can push a changed snapshot before the next question.
+
+Cadence starts both CLIs without a shell, disables tools, uses a dedicated empty
+working directory, bounds run time/output, and exposes cancel and visible error
+states. The app stores tab metadata and displayed Q&A messages locally, but not
+the complete transcript snapshot. Closing a tab removes Cadence's local handle
+to that provider thread.
+
 The protocol separates audio source tags from speaker identity:
 
 - `stream_tags`: audio provenance, currently `mic` and/or `system`
@@ -89,29 +123,45 @@ Without Zoom metadata or diarization, mic defaults to `You` and system audio
 defaults to `System audio`. The Electron client sends editable local labels and
 can send manual current-speaker activity for app-independent Zoom mode.
 
-### Pyannote diarization
+### Speaker diarization
 
-Diarization uses pyannote.audio Community-1 and labels mixed system audio as
-`Speaker 1`, `Speaker 2`, etc. It auto-enables when pyannote is installed and
-`DIARIZATION_HF_TOKEN`, `HF_TOKEN`, or `HUGGINGFACE_TOKEN` is present. Put the
-token in `server/.env` for normal local use. Manual and Zoom speaker labels
-still take priority when explicitly used.
+Diarization labels mixed system audio as `Speaker 1`, `Speaker 2`, etc. The
+default local setup is Sherpa-ONNX and does not require a Hugging Face token:
 
 ```bash
-uv sync --project server --extra dev --extra diarization
-
-DIARIZATION_HF_TOKEN=<hugging-face-token> \
-DIARIZATION_DEVICE=cpu \
-DIARIZATION_STREAMS=system \
+make setup-diarization
 PYTHONPATH=. uv run --project server --extra diarization python -m server.main
+```
+
+The setup target installs Sherpa-ONNX and downloads checksum-verified
+segmentation and speaker-embedding models into
+`~/.cache/cadence/diarization`. In `auto` mode, the server uses pyannote when
+it is installed and a Hugging Face token is available; otherwise it uses the
+local Sherpa models when present. Manual and Zoom speaker labels still take
+priority when explicitly used.
+
+For pyannote Community-1 instead, install its separate extra and set
+`DIARIZATION_HF_TOKEN`, `HF_TOKEN`, or `HUGGINGFACE_TOKEN` (normal local use
+can keep it in `server/.env`):
+
+```bash
+uv sync --project server --extra dev --extra diarization-pyannote
+DIARIZATION_BACKEND=pyannote \
+PYTHONPATH=. uv run --project server --extra diarization-pyannote python -m server.main
 ```
 
 Useful knobs:
 
+- `DIARIZATION_BACKEND=auto|sherpa-onnx|pyannote|off`
+- `DIARIZATION_STREAMS=system`
 - `DIARIZATION_MIN_SPEAKERS`
 - `DIARIZATION_MAX_SPEAKERS`
 - `DIARIZATION_MIN_TURN_SEC=0.2`
-- `DIARIZATION_BACKEND=off` to disable diarization
+- `DIARIZATION_MIN_NEW_AUDIO_SEC=4`
+- `DIARIZATION_WINDOW_SEC=12`
+- `DIARIZATION_LAG_SEC=4` (future context improves turn boundaries at the cost of latency)
+- `DIARIZATION_CLUSTER_THRESHOLD` (Sherpa speaker clustering sensitivity)
+- `SPEAKER_ACTIVITY_BOUNDARY_TOLERANCE_SEC=0.35`
 - `DIARIZATION_STRICT=1` to fail server startup if diarization cannot load
 
 pyannote models may require accepting gated Hugging Face model terms for
@@ -120,8 +170,16 @@ pyannote models may require accepting gated Hugging Face model terms for
 Real diarization smoke test:
 
 ```bash
-DIARIZATION_HF_TOKEN=<hugging-face-token> make real-diarization
+make real-diarization
+make real-pyannote-diarization  # uses a token already present in the environment or server/.env
 ```
+
+Whisper word timestamps are enabled by default (`WHISPER_WORD_TIMESTAMPS=1`).
+They let one ASR result be split at a speaker change. Consecutive fragments for
+the same stream and speaker are then joined into a phrase until punctuation, a
+pause, a speaker change, the maximum utterance duration, or Stop finalizes it.
+The mic and system streams have independent phrase assemblers, so activity on
+one stream cannot prematurely finalize the other.
 
 ### Speaker memory
 
@@ -215,7 +273,7 @@ pnpm dev:test-client
 
 ## Phase 4: Electron GUI client
 
-The Electron app captures **mic** and a user-selected **“system”** device (typically a virtual loopback input), streams both to the server, renders transcript updates, and saves transcript JSON on stop.
+The Electron app captures **mic** and a user-selected **“system”** device (typically a virtual loopback input), streams both to the server, renders transcript updates, and saves transcript JSON on stop. Stop first drains pending audio and waits for the server's final transcript acknowledgement, so the saved file includes the last phrase.
 The mic path has a mute button plus a client-side RMS gate, so quiet room noise
 is dropped before it reaches Whisper. A pause finalizes the current phrase even
 when the client stops sending silence.

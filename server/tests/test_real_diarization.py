@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from server.diarization import PyannoteDiarizationBackend
+from server.diarization import PyannoteDiarizationBackend, SherpaOnnxDiarizationBackend
 
 
 FIRST_PHRASE = "First speaker talks about payroll approvals."
@@ -17,15 +17,19 @@ SECOND_PHRASE = "Second speaker talks about vendor refunds."
 THIRD_PHRASE = "First speaker returns to discuss database access."
 
 
-def test_real_pyannote_diarization_two_speakers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_real_diarization_two_speakers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     if os.environ.get("RUN_REAL_DIARIZATION") != "1":
         pytest.skip("set RUN_REAL_DIARIZATION=1 to run real diarization")
-    if not _hf_token_present():
+    backend_name = os.environ.get("DIARIZATION_BACKEND", "sherpa-onnx").lower()
+    if backend_name in ("pyannote", "community") and not _hf_token_present():
         pytest.skip("DIARIZATION_HF_TOKEN, HF_TOKEN, or HUGGINGFACE_TOKEN is required")
     if not shutil.which("say") or not shutil.which("afconvert"):
         pytest.skip("macOS say and afconvert are required to synthesize local speech audio")
 
-    pytest.importorskip("pyannote.audio")
+    if backend_name in ("pyannote", "community"):
+        pytest.importorskip("pyannote.audio")
+    else:
+        pytest.importorskip("sherpa_onnx")
 
     monkeypatch.setenv("DIARIZATION_MIN_SPEAKERS", "2")
     monkeypatch.setenv("DIARIZATION_MAX_SPEAKERS", "2")
@@ -45,7 +49,10 @@ def test_real_pyannote_diarization_two_speakers(tmp_path: Path, monkeypatch: pyt
     )
     samples = pcm_to_float32(audio)
 
-    backend = PyannoteDiarizationBackend(device=os.environ.get("DIARIZATION_DEVICE", "cpu"))
+    if backend_name in ("pyannote", "community"):
+        backend = PyannoteDiarizationBackend(device=os.environ.get("DIARIZATION_DEVICE", "cpu"))
+    else:
+        backend = SherpaOnnxDiarizationBackend()
     turns = backend.diarize(samples, sample_rate)
     speaker_ids = {turn.speaker_id for turn in turns}
     speaker_by_expected_turn = {

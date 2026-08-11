@@ -32,8 +32,10 @@ class SpeakerTracker:
         local_label: str = "You",
         system_label: str = "System audio",
         active_speaker_ttl_sec: float = 15.0,
+        activity_boundary_tolerance_sec: float = 0.35,
     ) -> None:
         self.active_speaker_ttl_sec = active_speaker_ttl_sec
+        self.activity_boundary_tolerance_sec = max(0.0, activity_boundary_tolerance_sec)
         self.participants: dict[str, str] = {}
         self.stream_speakers: dict[StreamId, SpeakerIdentity] = {
             "mic": SpeakerIdentity("local:mic", local_label, "stream", 0.75),
@@ -158,6 +160,26 @@ class SpeakerTracker:
         if len(self.activities) > 500:
             self.activities = self.activities[-500:]
 
+    def remove_activities_in_range(
+        self,
+        *,
+        stream_id: StreamId,
+        start_sec: float,
+        end_sec: float,
+        sources: set[SpeakerSource],
+    ) -> None:
+        """Remove replaceable inferred turns while preserving manual/Zoom metadata."""
+        if end_sec < start_sec:
+            start_sec, end_sec = end_sec, start_sec
+        kept: list[SpeakerActivity] = []
+        for activity in self.activities:
+            activity_end = activity.end_sec if activity.end_sec is not None else float("inf")
+            overlaps = activity.start_sec < end_sec and activity_end > start_sec
+            if activity.stream_id == stream_id and activity.speaker_source in sources and overlaps:
+                continue
+            kept.append(activity)
+        self.activities = kept
+
     def resolve(self, *, stream_id: StreamId, start_sec: float, end_sec: float) -> SpeakerIdentity:
         activity = self._activity_for(stream_id=stream_id, start_sec=start_sec, end_sec=end_sec)
         if activity:
@@ -176,19 +198,24 @@ class SpeakerTracker:
         if stream_id != "system":
             return None
         mid_sec = start_sec + max(0.0, end_sec - start_sec) / 2.0
-        matches: list[SpeakerActivity] = []
+        exact_matches: list[SpeakerActivity] = []
+        boundary_matches: list[SpeakerActivity] = []
         for activity in self.activities:
             if activity.stream_id != stream_id:
                 continue
-            if activity.start_sec > mid_sec:
+            if activity.start_sec - self.activity_boundary_tolerance_sec > mid_sec:
                 continue
             if activity.end_sec is None:
                 ttl_sec = 3600.0 if activity.speaker_source == "manual" else self.active_speaker_ttl_sec
-                if mid_sec - activity.start_sec > ttl_sec:
+                if mid_sec - activity.start_sec > ttl_sec + self.activity_boundary_tolerance_sec:
                     continue
-            elif activity.end_sec + 0.25 < mid_sec:
+                is_exact = activity.start_sec <= mid_sec and mid_sec - activity.start_sec <= ttl_sec
+            elif activity.end_sec + self.activity_boundary_tolerance_sec < mid_sec:
                 continue
-            matches.append(activity)
+            else:
+                is_exact = activity.start_sec <= mid_sec <= activity.end_sec
+            (exact_matches if is_exact else boundary_matches).append(activity)
+        matches = exact_matches or boundary_matches
         if not matches:
             return None
         return max(matches, key=lambda item: (_activity_priority(item), item.start_sec))

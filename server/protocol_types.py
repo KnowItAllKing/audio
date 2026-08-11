@@ -5,6 +5,7 @@ from typing_extensions import NotRequired
 
 
 StreamId = Literal["mic", "system"]
+TranscriptLayer = Literal["raw", "processed"]
 SpeakerSource = Literal["stream", "zoom", "diarization", "memory", "manual", "unknown"]
 
 
@@ -32,6 +33,7 @@ class ControlMessage(TypedDict):
         "stop",
         "ping",
         "pong",
+        "stopped",
         "metadata",
         "speaker_activity",
         "speaker_memory_review",
@@ -59,6 +61,7 @@ class TranscriptSegment(TypedDict):
 class TranscriptUpdateMessage(TypedDict):
     type: Literal["transcript_update"]
     session_id: str
+    layer: TranscriptLayer
     segments: list[TranscriptSegment]
 
 

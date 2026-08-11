@@ -160,9 +160,35 @@ fingerprints:
 
 ## Server → Client messages
 
+### `control`
+
+The server answers `ping` with `pong`. After a client sends `stop`, it drains
+all pending audio (including a tail shorter than the normal transcription
+threshold), finalizes every stream's open utterance, sends the resulting
+`transcript_update` messages, and then acknowledges completion:
+
+```json
+{
+  "type": "control",
+  "session_id": "1b0d8f1e-2e8c-4e5f-baf5-0c0f4d1d5c3b",
+  "command": "stopped"
+}
+```
+
+Clients should continue applying transcript updates until this acknowledgement
+arrives before saving or closing the session.
+
 ### `transcript_update`
 
 Incremental transcript updates. The client should treat these as **append/replace** updates based on `segments[*].id`, not purely as a stream of text.
+
+Every update identifies its transcript layer:
+
+- `raw`: the low-latency Whisper result with source-level speaker labels. Raw
+  segments are immutable snapshots and have `full_context_available: false`.
+- `processed`: the delayed canonical result after diarization, word-level
+  speaker splitting, and utterance joining. Older servers that omit `layer`
+  should be interpreted as `processed`.
 
 #### Schema
 
@@ -170,6 +196,7 @@ Incremental transcript updates. The client should treat these as **append/replac
 {
   "type": "transcript_update",
   "session_id": "1b0d8f1e-2e8c-4e5f-baf5-0c0f4d1d5c3b",
+  "layer": "processed",
   "segments": [
     {
       "id": "seg-0001",

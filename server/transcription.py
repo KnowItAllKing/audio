@@ -25,9 +25,11 @@ def compute_window(
     window_bytes: int,
 ) -> Tuple[int, int]:
     """
-    Returns (window_start, window_end) in absolute byte offsets.
-    """
-    window_end = int(buffer_end_offset_bytes)
-    window_start = max(int(last_transcribed_offset_bytes), window_end - int(window_bytes))
-    return window_start, window_end
+    Returns the next chronological (window_start, window_end) byte range.
 
+    Processing the oldest pending range first prevents data loss when the
+    transcriber temporarily falls more than one window behind live audio.
+    """
+    window_start = min(int(last_transcribed_offset_bytes), int(buffer_end_offset_bytes))
+    window_end = min(int(buffer_end_offset_bytes), window_start + max(0, int(window_bytes)))
+    return window_start, window_end

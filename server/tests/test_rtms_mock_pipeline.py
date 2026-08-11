@@ -169,6 +169,8 @@ async def collect_final_segments(ws: Any, *, expected_count: int) -> list[dict[s
         message = json.loads(raw)
         if message.get("type") != "transcript_update":
             continue
+        if message.get("layer", "processed") != "processed":
+            continue
         for segment in message.get("segments", []):
             if segment.get("is_final"):
                 by_text[segment["text"]] = segment

@@ -127,3 +127,23 @@ def test_stale_open_zoom_activity_falls_back_to_system_label() -> None:
 
     assert speaker.speaker_id == "system:unknown"
     assert speaker.speaker_label == "Computer audio"
+
+
+def test_activity_boundary_tolerance_absorbs_small_timestamp_drift() -> None:
+    tracker = SpeakerTracker(activity_boundary_tolerance_sec=0.35)
+    tracker.apply_activity(
+        {
+            "participant_id": "p1",
+            "participant_name": "Taylor",
+            "stream_id": "system",
+            "speaker_source": "diarization",
+            "start_sec": 10.0,
+            "end_sec": 12.0,
+        }
+    )
+
+    before = tracker.resolve(stream_id="system", start_sec=9.5, end_sec=9.9)
+    after = tracker.resolve(stream_id="system", start_sec=12.1, end_sec=12.4)
+
+    assert before.speaker_id == "diarization:p1"
+    assert after.speaker_id == "diarization:p1"

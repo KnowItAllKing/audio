@@ -16,6 +16,10 @@ dev = [
   "pytest",
 ]
 diarization = [
+  "sherpa-onnx==1.13.4",
+  "sherpa-onnx-core==1.13.4",
+]
+diarization-pyannote = [
   "pyannote.audio>=4",
 ]
 

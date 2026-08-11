@@ -10,6 +10,17 @@ import {
   saveSpeakerMemoryProfiles,
   type SpeakerMemoryProfile
 } from "./SpeakerMemoryStore";
+import { reconcileCrossStreamDuplicates } from "./TranscriptReconciler";
+import { formatCleanTranscript } from "./CleanTranscript";
+import {
+  loadAiThreads,
+  saveAiThreads,
+  titleFromQuestion,
+  transcriptFingerprint,
+  type AiMessage,
+  type AiThread
+} from "./AiThreadStore";
+import type { AiCliStatus, AiProvider, AiRunRequest } from "../shared/AiTypes";
 
 type TranscriptSegment = {
   id: string;
@@ -26,9 +37,12 @@ type TranscriptSegment = {
   final_reason?: string;
 };
 
+type TranscriptLayer = "raw" | "processed";
+
 type TranscriptUpdateMessage = {
   type: "transcript_update";
   session_id: string;
+  layer?: TranscriptLayer;
   segments: TranscriptSegment[];
 };
 
@@ -86,6 +100,13 @@ type ControlMessage = {
   payload?: Record<string, unknown>;
 };
 
+type ServerControlMessage = {
+  type: "control";
+  session_id: string;
+  command: "pong" | "stopped";
+  payload?: Record<string, unknown>;
+};
+
 // AudioChunkMessage type lives in AudioStreamSender module.
 
 const $ = <T extends HTMLElement>(id: string) =>
@@ -123,6 +144,30 @@ const recvStatsEl = $<HTMLSpanElement>("recvStats");
 const viewBubblesBtn = $<HTMLButtonElement>("viewBubblesBtn");
 const viewBlocksBtn = $<HTMLButtonElement>("viewBlocksBtn");
 const viewScriptBtn = $<HTMLButtonElement>("viewScriptBtn");
+const layerRawBtn = $<HTMLButtonElement>("layerRawBtn");
+const layerProcessedBtn = $<HTMLButtonElement>("layerProcessedBtn");
+const rawLayerCountEl = $<HTMLSpanElement>("rawLayerCount");
+const processedLayerCountEl = $<HTMLSpanElement>("processedLayerCount");
+const layerDescriptionEl = $<HTMLSpanElement>("layerDescription");
+const jumpLatestBtn = $<HTMLButtonElement>("jumpLatestBtn");
+const copyTranscriptBtn = $<HTMLButtonElement>("copyTranscriptBtn");
+const askAiBtn = $<HTMLButtonElement>("askAiBtn");
+const aiPanelEl = $<HTMLElement>("aiPanel");
+const aiPanelCloseBtn = $<HTMLButtonElement>("aiPanelCloseBtn");
+const aiProviderSelect = $<HTMLSelectElement>("aiProviderSelect");
+const aiModelSelect = $<HTMLSelectElement>("aiModelSelect");
+const aiNewThreadBtn = $<HTMLButtonElement>("aiNewThreadBtn");
+const aiCliStatusEl = $<HTMLSpanElement>("aiCliStatus");
+const aiRefreshStatusBtn = $<HTMLButtonElement>("aiRefreshStatusBtn");
+const aiTabsEl = $<HTMLDivElement>("aiTabs");
+const aiEmptyEl = $<HTMLDivElement>("aiEmpty");
+const aiConversationEl = $<HTMLDivElement>("aiConversation");
+const aiTranscriptStateEl = $<HTMLSpanElement>("aiTranscriptState");
+const aiSyncBtn = $<HTMLButtonElement>("aiSyncBtn");
+const aiMessagesEl = $<HTMLDivElement>("aiMessages");
+const aiQuestionEl = $<HTMLTextAreaElement>("aiQuestion");
+const aiCancelBtn = $<HTMLButtonElement>("aiCancelBtn");
+const aiSendBtn = $<HTMLButtonElement>("aiSendBtn");
 
 function uuidv4(): string {
   // Browser-safe UUID (Chromium supports crypto.randomUUID)
@@ -233,10 +278,43 @@ type CaptureHandle = {
 let ws: WebSocket | null = null;
 let startedAt: number | null = null;
 let endedAt: number | null = null;
+let resolveStopAck: ((received: boolean) => void) | null = null;
 
-const segmentsById = new Map<string, TranscriptSegment>();
+const rawSegmentsById = new Map<string, TranscriptSegment>();
+const processedSegmentsById = new Map<string, TranscriptSegment>();
 let recvCount = 0;
 let transcriptViewMode: "bubbles" | "blocks" | "script" = "bubbles";
+let transcriptLayer: TranscriptLayer = "raw";
+let renderedTranscriptLayer: TranscriptLayer | null = null;
+
+const AI_MODEL_OPTIONS: Record<AiProvider, Array<{ value: string; label: string }>> = {
+  codex: [
+    { value: "", label: "Automatic (CLI default)" },
+    { value: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
+    { value: "gpt-5.6-sol", label: "GPT-5.6 Sol" }
+  ],
+  claude: [
+    { value: "", label: "Automatic (CLI default)" },
+    { value: "sonnet", label: "Sonnet" },
+    { value: "opus", label: "Opus" },
+    { value: "fable", label: "Fable" }
+  ]
+};
+
+let aiThreads: AiThread[] = loadAiThreads();
+let activeAiThreadId: string | null = aiThreads.at(-1)?.id ?? null;
+let aiCliStatus: AiCliStatus | null = null;
+const runningAiThreads = new Map<string, { requestId: string; cancelling: boolean }>();
+
+type TranscriptScrollState = {
+  scrollTop: number;
+  followLatest: boolean;
+};
+
+const transcriptScrollState: Record<TranscriptLayer, TranscriptScrollState> = {
+  raw: { scrollTop: 0, followLatest: true },
+  processed: { scrollTop: 0, followLatest: true }
+};
 
 let micSender: AudioStreamSender | null = null;
 let sysSender: AudioStreamSender | null = null;
@@ -256,6 +334,21 @@ function sendControl(command: ControlMessage["command"], payload?: Record<string
     payload
   };
   ws.send(JSON.stringify(msg));
+}
+
+function waitForStopAck(timeoutMs = 120_000): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (received: boolean) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      if (resolveStopAck === finish) resolveStopAck = null;
+      resolve(received);
+    };
+    const timeout = window.setTimeout(() => finish(false), timeoutMs);
+    resolveStopAck = finish;
+  });
 }
 
 function updateSpeakerMemoryStatus(profiles: SpeakerMemoryProfile[]): void {
@@ -476,16 +569,428 @@ function setTranscriptViewMode(mode: "bubbles" | "blocks" | "script"): void {
   renderTranscript();
 }
 
+function segmentsForLayer(layer: TranscriptLayer): Map<string, TranscriptSegment> {
+  return layer === "raw" ? rawSegmentsById : processedSegmentsById;
+}
+
+function updateLayerCounts(): void {
+  rawLayerCountEl.textContent = String(rawSegmentsById.size);
+  processedLayerCountEl.textContent = String(processedSegmentsById.size);
+  copyTranscriptBtn.disabled = processedSegmentsById.size === 0;
+  refreshAiTranscriptState();
+}
+
+function reconcileTranscriptMap(segments: Map<string, TranscriptSegment>): void {
+  const reconciled = reconcileCrossStreamDuplicates(segments.values());
+  segments.clear();
+  for (const segment of reconciled) segments.set(segment.id, segment);
+}
+
+let copyFeedbackTimer: number | null = null;
+
+function setCopyButtonFeedback(state: "idle" | "copied" | "failed"): void {
+  if (copyFeedbackTimer !== null) window.clearTimeout(copyFeedbackTimer);
+  copyTranscriptBtn.classList.toggle("copied", state === "copied");
+  copyTranscriptBtn.classList.toggle("failed", state === "failed");
+  copyTranscriptBtn.innerHTML =
+    state === "copied"
+      ? "Copied"
+      : state === "failed"
+        ? "Copy failed"
+        : 'Copy<span class="copyLongLabel"> clean</span>';
+  if (state !== "idle") {
+    copyFeedbackTimer = window.setTimeout(() => {
+      copyFeedbackTimer = null;
+      setCopyButtonFeedback("idle");
+    }, 1800);
+  }
+}
+
+async function copyCleanProcessedTranscript(): Promise<void> {
+  const text = formatCleanTranscript(processedSegmentsById.values());
+  if (!text) return;
+  try {
+    if (window.audioClient?.copyText) {
+      const result = await window.audioClient.copyText(text);
+      if (!result.copied) throw new Error(result.error || "clipboard write failed");
+    } else {
+      await navigator.clipboard.writeText(text);
+    }
+    setCopyButtonFeedback("copied");
+  } catch {
+    setCopyButtonFeedback("failed");
+  }
+}
+
+function cleanProcessedTranscript(): string {
+  return formatCleanTranscript(processedSegmentsById.values());
+}
+
+function currentAiThread(): AiThread | undefined {
+  return activeAiThreadId ? aiThreads.find((thread) => thread.id === activeAiThreadId) : undefined;
+}
+
+function storeAiThreads(): void {
+  saveAiThreads(aiThreads);
+}
+
+function aiProviderName(provider: AiProvider): string {
+  return provider === "codex" ? "Codex" : "Claude";
+}
+
+function updateAiModelOptions(): void {
+  const provider = aiProviderSelect.value as AiProvider;
+  aiModelSelect.replaceChildren(
+    ...AI_MODEL_OPTIONS[provider].map(({ value, label }) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      return option;
+    })
+  );
+}
+
+function updateAiStatusText(): void {
+  if (!aiCliStatus) {
+    aiCliStatusEl.textContent = "Checking installed CLIs…";
+    aiCliStatusEl.classList.remove("bad");
+    return;
+  }
+  const details = (["codex", "claude"] as AiProvider[]).map((provider) => {
+    const status = aiCliStatus?.[provider];
+    const name = aiProviderName(provider);
+    return status?.available ? `${name} ready${status.version ? ` · ${status.version}` : ""}` : `${name} unavailable`;
+  });
+  aiCliStatusEl.textContent = details.join("   |   ");
+  const selected = aiCliStatus[aiProviderSelect.value as AiProvider];
+  aiCliStatusEl.classList.toggle("bad", !selected.available);
+}
+
+async function refreshAiCliStatus(): Promise<void> {
+  aiRefreshStatusBtn.disabled = true;
+  aiCliStatus = null;
+  updateAiStatusText();
+  try {
+    if (!window.audioClient?.getAiCliStatus) throw new Error("AI bridge is unavailable");
+    aiCliStatus = await window.audioClient.getAiCliStatus();
+  } catch (error) {
+    aiCliStatusEl.textContent = `Could not check CLIs: ${error instanceof Error ? error.message : String(error)}`;
+    aiCliStatusEl.classList.add("bad");
+  } finally {
+    aiRefreshStatusBtn.disabled = false;
+    if (aiCliStatus) updateAiStatusText();
+  }
+}
+
+function makeAiMessage(role: AiMessage["role"], text: string): AiMessage {
+  return { id: uuidv4(), role, text, createdAt: Date.now() };
+}
+
+function addAiMessage(thread: AiThread, role: AiMessage["role"], text: string): void {
+  thread.messages.push(makeAiMessage(role, text));
+  if (thread.messages.length > 200) thread.messages.splice(0, thread.messages.length - 200);
+  thread.updatedAt = Date.now();
+}
+
+function createAiThread(): void {
+  const provider = aiProviderSelect.value as AiProvider;
+  const now = Date.now();
+  const thread: AiThread = {
+    id: uuidv4(),
+    provider,
+    model: aiModelSelect.value,
+    title: `${aiProviderName(provider)} chat`,
+    createdAt: now,
+    updatedAt: now,
+    messages: []
+  };
+  aiThreads.push(thread);
+  if (aiThreads.length > 20) {
+    const removable = aiThreads.find((item) => !runningAiThreads.has(item.id));
+    if (removable) aiThreads = aiThreads.filter((item) => item.id !== removable.id);
+  }
+  activeAiThreadId = thread.id;
+  storeAiThreads();
+  renderAiWorkspace();
+  aiQuestionEl.focus();
+}
+
+async function closeAiThread(threadId: string): Promise<void> {
+  const running = runningAiThreads.get(threadId);
+  if (running) {
+    running.cancelling = true;
+    renderAiWorkspace();
+    await window.audioClient?.cancelAiTurn?.(running.requestId);
+  }
+  const index = aiThreads.findIndex((thread) => thread.id === threadId);
+  if (index < 0) return;
+  aiThreads.splice(index, 1);
+  if (activeAiThreadId === threadId) {
+    activeAiThreadId = aiThreads[Math.min(index, aiThreads.length - 1)]?.id ?? null;
+  }
+  storeAiThreads();
+  renderAiWorkspace();
+}
+
+function selectAiThread(threadId: string): void {
+  if (!aiThreads.some((thread) => thread.id === threadId)) return;
+  activeAiThreadId = threadId;
+  renderAiWorkspace();
+}
+
+function renderAiTabs(): void {
+  aiTabsEl.replaceChildren(
+    ...aiThreads.map((thread) => {
+      const tab = document.createElement("div");
+      const isActive = thread.id === activeAiThreadId;
+      tab.className = `aiTab${isActive ? " active" : ""}`;
+      tab.setAttribute("role", "presentation");
+
+      const select = document.createElement("button");
+      select.type = "button";
+      select.className = "aiTabSelect";
+      select.textContent = thread.title;
+      select.title = `${aiProviderName(thread.provider)} · ${thread.model || "CLI default"} · ${thread.title}`;
+      select.setAttribute("role", "tab");
+      select.setAttribute("aria-selected", String(isActive));
+      select.addEventListener("click", () => selectAiThread(thread.id));
+
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "aiTabClose";
+      close.textContent = "×";
+      close.setAttribute("aria-label", `Close ${thread.title}`);
+      close.addEventListener("click", () => void closeAiThread(thread.id));
+
+      tab.append(select, close);
+      return tab;
+    })
+  );
+  aiTabsEl.hidden = aiThreads.length === 0;
+}
+
+function renderAiMessages(thread: AiThread): void {
+  const wasNearBottom = aiMessagesEl.scrollHeight - aiMessagesEl.clientHeight - aiMessagesEl.scrollTop < 56;
+  const messageEls = thread.messages.map((message) => {
+    const element = document.createElement("div");
+    element.className = `aiMessage ${message.role}`;
+    element.textContent = message.text;
+    return element;
+  });
+  const running = runningAiThreads.get(thread.id);
+  if (running) {
+    const thinking = document.createElement("div");
+    thinking.className = "aiThinking";
+    thinking.textContent = running.cancelling
+      ? `Cancelling ${aiProviderName(thread.provider)}…`
+      : `${aiProviderName(thread.provider)} is working…`;
+    messageEls.push(thinking);
+  }
+  aiMessagesEl.replaceChildren(...messageEls);
+  if (wasNearBottom || running) aiMessagesEl.scrollTop = aiMessagesEl.scrollHeight;
+}
+
+function refreshAiTranscriptState(): void {
+  if (aiPanelEl.hidden) return;
+  const thread = currentAiThread();
+  if (!thread) return;
+  const transcript = cleanProcessedTranscript();
+  const fingerprint = transcript ? transcriptFingerprint(transcript) : "";
+  const running = runningAiThreads.has(thread.id);
+
+  if (!transcript) {
+    aiTranscriptStateEl.textContent = "Processed transcript is empty";
+  } else if (!thread.remoteThreadId) {
+    aiTranscriptStateEl.textContent = `Not sent yet · ${transcript.length.toLocaleString()} characters`;
+  } else if (thread.lastTranscriptFingerprint === fingerprint) {
+    aiTranscriptStateEl.textContent = `In sync · ${transcript.length.toLocaleString()} characters`;
+  } else {
+    aiTranscriptStateEl.textContent = `Update ready · ${transcript.length.toLocaleString()} characters now`;
+  }
+  aiSyncBtn.disabled =
+    running || !thread.remoteThreadId || !transcript || thread.lastTranscriptFingerprint === fingerprint;
+  updateAiComposerState();
+}
+
+function updateAiComposerState(): void {
+  const thread = currentAiThread();
+  const running = thread ? runningAiThreads.get(thread.id) : undefined;
+  const needsInitialTranscript = Boolean(thread && !thread.remoteThreadId);
+  aiSendBtn.disabled =
+    !thread || Boolean(running) || !aiQuestionEl.value.trim() || (needsInitialTranscript && !cleanProcessedTranscript());
+  aiCancelBtn.hidden = !running;
+  aiCancelBtn.disabled = Boolean(running?.cancelling);
+  aiQuestionEl.disabled = !thread || Boolean(running);
+}
+
+function renderAiWorkspace(): void {
+  renderAiTabs();
+  const thread = currentAiThread();
+  aiEmptyEl.hidden = Boolean(thread);
+  aiConversationEl.hidden = !thread;
+  if (!thread) {
+    aiMessagesEl.replaceChildren();
+    return;
+  }
+  renderAiMessages(thread);
+  refreshAiTranscriptState();
+}
+
+function openAiPanel(): void {
+  aiPanelEl.hidden = false;
+  renderAiWorkspace();
+  if (!aiCliStatus) void refreshAiCliStatus();
+  if (currentAiThread()) aiQuestionEl.focus();
+}
+
+function closeAiPanel(): void {
+  aiPanelEl.hidden = true;
+  askAiBtn.focus();
+}
+
+async function runAiRequest(syncOnly: boolean): Promise<void> {
+  const thread = currentAiThread();
+  if (!thread || runningAiThreads.has(thread.id)) return;
+  const transcript = cleanProcessedTranscript();
+  const fingerprint = transcript ? transcriptFingerprint(transcript) : "";
+  const shouldSendTranscript = !thread.remoteThreadId || thread.lastTranscriptFingerprint !== fingerprint;
+  const question = syncOnly ? "" : aiQuestionEl.value.trim();
+  if (!question && !syncOnly) return;
+  if (shouldSendTranscript && !transcript) {
+    addAiMessage(thread, "error", "The Processed transcript is empty. Wait for cleaned dialogue before sending.");
+    storeAiThreads();
+    renderAiWorkspace();
+    return;
+  }
+
+  if (shouldSendTranscript) {
+    addAiMessage(thread, "status", `Sending Processed transcript snapshot · ${transcript.length.toLocaleString()} characters`);
+  }
+  if (!syncOnly) {
+    if (!thread.messages.some((message) => message.role === "user")) thread.title = titleFromQuestion(question);
+    addAiMessage(thread, "user", question);
+    aiQuestionEl.value = "";
+  }
+
+  const request: AiRunRequest = {
+    requestId: uuidv4(),
+    uiThreadId: thread.id,
+    provider: thread.provider,
+    model: thread.model,
+    remoteThreadId: thread.remoteThreadId,
+    transcript: shouldSendTranscript ? transcript : "",
+    question,
+    syncOnly
+  };
+  runningAiThreads.set(thread.id, { requestId: request.requestId, cancelling: false });
+  storeAiThreads();
+  renderAiWorkspace();
+
+  try {
+    if (!window.audioClient?.runAiTurn) throw new Error("AI bridge is unavailable");
+    const result = await window.audioClient.runAiTurn(request);
+    const liveThread = aiThreads.find((item) => item.id === thread.id);
+    if (!liveThread) return;
+    if (result.ok && result.response && result.remoteThreadId) {
+      liveThread.remoteThreadId = result.remoteThreadId;
+      if (shouldSendTranscript) {
+        liveThread.lastTranscriptFingerprint = fingerprint;
+        liveThread.lastTranscriptChars = transcript.length;
+      }
+      addAiMessage(liveThread, "assistant", result.response);
+    } else if (result.cancelled) {
+      addAiMessage(liveThread, "status", "Request cancelled.");
+    } else {
+      addAiMessage(liveThread, "error", result.error || "The AI CLI request failed.");
+    }
+  } catch (error) {
+    const liveThread = aiThreads.find((item) => item.id === thread.id);
+    if (liveThread) addAiMessage(liveThread, "error", error instanceof Error ? error.message : String(error));
+  } finally {
+    runningAiThreads.delete(thread.id);
+    storeAiThreads();
+    renderAiWorkspace();
+  }
+}
+
+async function cancelCurrentAiRequest(): Promise<void> {
+  const thread = currentAiThread();
+  const running = thread ? runningAiThreads.get(thread.id) : undefined;
+  if (!running || running.cancelling) return;
+  running.cancelling = true;
+  renderAiWorkspace();
+  try {
+    await window.audioClient?.cancelAiTurn?.(running.requestId);
+  } catch {
+    // The in-flight invocation reports the actionable error in the thread.
+  }
+}
+
+function isTranscriptNearBottom(): boolean {
+  return transcriptEl.scrollHeight - transcriptEl.clientHeight - transcriptEl.scrollTop <= 72;
+}
+
+function captureTranscriptScroll(): void {
+  const state = transcriptScrollState[transcriptLayer];
+  state.scrollTop = transcriptEl.scrollTop;
+  state.followLatest = isTranscriptNearBottom();
+}
+
+function resetTranscriptScroll(): void {
+  transcriptScrollState.raw = { scrollTop: 0, followLatest: true };
+  transcriptScrollState.processed = { scrollTop: 0, followLatest: true };
+  renderedTranscriptLayer = null;
+  jumpLatestBtn.hidden = true;
+}
+
+function updateJumpLatestButton(): void {
+  jumpLatestBtn.hidden = transcriptScrollState[transcriptLayer].followLatest;
+}
+
+function jumpToLatest(): void {
+  const state = transcriptScrollState[transcriptLayer];
+  state.followLatest = true;
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  state.scrollTop = transcriptEl.scrollTop;
+  updateJumpLatestButton();
+}
+
+function setTranscriptLayer(layer: TranscriptLayer): void {
+  if (renderedTranscriptLayer === transcriptLayer) captureTranscriptScroll();
+  transcriptLayer = layer;
+  const isRaw = layer === "raw";
+  layerRawBtn.classList.toggle("active", isRaw);
+  layerProcessedBtn.classList.toggle("active", !isRaw);
+  layerRawBtn.setAttribute("aria-pressed", String(isRaw));
+  layerProcessedBtn.setAttribute("aria-pressed", String(!isRaw));
+  transcriptEl.classList.toggle("layer-raw", isRaw);
+  transcriptEl.classList.toggle("layer-processed", !isRaw);
+  transcriptEl.dataset.emptyMessage = isRaw
+    ? "Listening for speech…"
+    : "The cleaned transcript follows a few seconds behind.";
+  layerDescriptionEl.textContent = isRaw
+    ? "Immediate ASR · source labels"
+    : "Diarized · joined · canonical record";
+  renderTranscript();
+}
+
 function appendTranscriptNotice(text: string, kind: "neutral" | "bad" = "neutral"): void {
+  const state = transcriptScrollState[transcriptLayer];
   const line = document.createElement("div");
   line.className = `noticeLine ${kind === "bad" ? "bad" : ""}`.trim();
   line.textContent = text;
   transcriptEl.appendChild(line);
-  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  if (state.followLatest) {
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  } else {
+    transcriptEl.scrollTop = state.scrollTop;
+  }
 }
 
 function renderTranscript(): void {
-  const segs = [...segmentsById.values()].sort((a, b) => {
+  if (renderedTranscriptLayer === transcriptLayer) captureTranscriptScroll();
+  const scrollState = transcriptScrollState[transcriptLayer];
+  const segs = [...segmentsForLayer(transcriptLayer).values()].sort((a, b) => {
     if (a.start_sec !== b.start_sec) return a.start_sec - b.start_sec;
     return a.id.localeCompare(b.id);
   });
@@ -528,7 +1033,15 @@ function renderTranscript(): void {
       return entry;
     })
   );
-  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  renderedTranscriptLayer = transcriptLayer;
+  if (scrollState.followLatest) {
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  } else {
+    const maxScrollTop = Math.max(0, transcriptEl.scrollHeight - transcriptEl.clientHeight);
+    transcriptEl.scrollTop = Math.min(scrollState.scrollTop, maxScrollTop);
+  }
+  scrollState.scrollTop = transcriptEl.scrollTop;
+  updateJumpLatestButton();
 }
 
 function requestSpeakerMemoryReview(): void {
@@ -808,7 +1321,11 @@ async function start(): Promise<void> {
     ws.close();
   }
 
-  segmentsById.clear();
+  rawSegmentsById.clear();
+  processedSegmentsById.clear();
+  resetTranscriptScroll();
+  setTranscriptLayer("raw");
+  updateLayerCounts();
   recvCount = 0;
   micSender = null;
   sysSender = null;
@@ -819,7 +1336,6 @@ async function start(): Promise<void> {
   updateLevelStatus("mic", null);
   updateLevelStatus("system", null);
   recvStatsEl.textContent = "0";
-  transcriptEl.replaceChildren();
   speakerLegendEl.replaceChildren();
   speakerReviewListEl.replaceChildren();
   updateSpeakerMemoryStatus(loadSpeakerMemoryProfiles());
@@ -855,13 +1371,17 @@ async function start(): Promise<void> {
     const type = (msg as any)?.type;
     if (type === "transcript_update") {
       const tu = msg as TranscriptUpdateMessage;
+      const layer = tu.layer === "raw" ? "raw" : "processed";
+      const layerSegments = segmentsForLayer(layer);
       for (const s of tu.segments ?? []) {
-        segmentsById.set(s.id, s);
+        layerSegments.set(s.id, s);
       }
+      reconcileTranscriptMap(layerSegments);
+      updateLayerCounts();
       recvCount += 1;
       recvStatsEl.textContent = String(recvCount);
       setLastUpdate(Date.now());
-      renderTranscript();
+      if (layer === transcriptLayer) renderTranscript();
     } else if (type === "speaker_memory_review") {
       const review = msg as SpeakerMemoryReviewMessage;
       renderSpeakerMemoryReview(review.samples ?? []);
@@ -874,6 +1394,9 @@ async function start(): Promise<void> {
     } else if (type === "speaker_memory_profiles") {
       const profiles = msg as SpeakerMemoryProfilesMessage;
       storeSpeakerMemoryProfiles(profiles.profiles ?? []);
+    } else if (type === "control") {
+      const control = msg as ServerControlMessage;
+      if (control.command === "stopped") resolveStopAck?.(true);
     } else if (type === "error") {
       const err = msg as ErrorMessage;
       setConnStatus(`Error: ${err.code}`, "bad");
@@ -886,6 +1409,7 @@ async function start(): Promise<void> {
   };
 
   ws.onclose = () => {
+    resolveStopAck?.(false);
     setConnStatus("Disconnected");
     startBtn.disabled = false;
     stopBtn.disabled = true;
@@ -902,11 +1426,17 @@ async function stop(): Promise<void> {
   }
   captures = [];
 
+  let finalized = true;
   if (ws && ws.readyState === WebSocket.OPEN) {
     try {
+      setConnStatus("Finalizing…");
+      const stopAck = waitForStopAck();
       sendControl("stop", {});
-      sendControl("speaker_memory_review", {});
-    } catch {}
+      finalized = await stopAck;
+      setConnStatus(finalized ? "Finalized" : "Finalization timed out", finalized ? "good" : "bad");
+    } catch {
+      finalized = false;
+    }
   }
   micSender = null;
   sysSender = null;
@@ -920,9 +1450,20 @@ async function stop(): Promise<void> {
   startBtn.disabled = false;
   stopBtn.disabled = true;
 
+  if (!finalized) {
+    appendTranscriptNotice(
+      "Server finalization did not complete before the transcript was saved; the last phrase may be incomplete.",
+      "bad"
+    );
+  }
+
   // Save transcript JSON
   const session_id = sessionIdInput.value;
-  const segments = [...segmentsById.values()].sort((a, b) => {
+  const segments = [...processedSegmentsById.values()].sort((a, b) => {
+    if (a.start_sec !== b.start_sec) return a.start_sec - b.start_sec;
+    return a.id.localeCompare(b.id);
+  });
+  const rawSegments = [...rawSegmentsById.values()].sort((a, b) => {
     if (a.start_sec !== b.start_sec) return a.start_sec - b.start_sec;
     return a.id.localeCompare(b.id);
   });
@@ -931,7 +1472,8 @@ async function stop(): Promise<void> {
     session_id,
     started_at: startedAt,
     ended_at: endedAt,
-    segments
+    segments,
+    raw_segments: rawSegments
   };
 
   const suggestedName = `transcript-${session_id}.json`;
@@ -983,12 +1525,46 @@ activeSpeakerLabelInput.addEventListener("keydown", (ev) => {
 viewBubblesBtn.addEventListener("click", () => setTranscriptViewMode("bubbles"));
 viewBlocksBtn.addEventListener("click", () => setTranscriptViewMode("blocks"));
 viewScriptBtn.addEventListener("click", () => setTranscriptViewMode("script"));
+layerRawBtn.addEventListener("click", () => setTranscriptLayer("raw"));
+layerProcessedBtn.addEventListener("click", () => setTranscriptLayer("processed"));
+jumpLatestBtn.addEventListener("click", () => jumpToLatest());
+copyTranscriptBtn.addEventListener("click", () => void copyCleanProcessedTranscript());
+askAiBtn.addEventListener("click", () => openAiPanel());
+aiPanelCloseBtn.addEventListener("click", () => closeAiPanel());
+aiProviderSelect.addEventListener("change", () => {
+  updateAiModelOptions();
+  updateAiStatusText();
+});
+aiNewThreadBtn.addEventListener("click", () => createAiThread());
+aiRefreshStatusBtn.addEventListener("click", () => void refreshAiCliStatus());
+aiSyncBtn.addEventListener("click", () => void runAiRequest(true));
+aiSendBtn.addEventListener("click", () => void runAiRequest(false));
+aiCancelBtn.addEventListener("click", () => void cancelCurrentAiRequest());
+aiQuestionEl.addEventListener("input", () => updateAiComposerState());
+aiQuestionEl.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    if (!aiSendBtn.disabled) void runAiRequest(false);
+  }
+});
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !aiPanelEl.hidden) closeAiPanel();
+});
+transcriptEl.addEventListener("scroll", () => {
+  if (renderedTranscriptLayer !== transcriptLayer) return;
+  captureTranscriptScroll();
+  updateJumpLatestButton();
+});
 
 // Initial state
 sessionIdInput.value = uuidv4();
 setTranscriptViewMode("bubbles");
+setTranscriptLayer("raw");
 setConnStatus("Disconnected");
 updateMicMuteUi();
 updateMicGateStatus(null);
+updateLayerCounts();
 updateSpeakerMemoryStatus(loadSpeakerMemoryProfiles());
+updateAiModelOptions();
+renderAiWorkspace();
 void refreshDevices();

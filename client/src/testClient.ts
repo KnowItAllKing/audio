@@ -20,6 +20,7 @@ type AudioChunkMessage = {
 type TranscriptUpdateMessage = {
   type: "transcript_update";
   session_id: string;
+  layer?: "raw" | "processed";
   segments: Array<{
     id: string;
     start_sec: number;
@@ -198,7 +199,8 @@ ws.on("message", (data: RawData) => {
     const text = seg0?.text ?? "<no text>";
     const speaker = seg0?.speaker_label ?? "<no speaker>";
     const final = seg0?.is_final ? "final" : "partial";
-    console.log(`transcript_update: received=${received} speaker=${JSON.stringify(speaker)} ${final} text=${JSON.stringify(text)}`);
+    const layer = tu.layer ?? "processed";
+    console.log(`transcript_update: received=${received} layer=${layer} speaker=${JSON.stringify(speaker)} ${final} text=${JSON.stringify(text)}`);
   } else if (t === "error") {
     const err = msg as ErrorMessage;
     console.error(`server_error: code=${err.code} message=${err.message}`);

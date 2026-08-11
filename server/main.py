@@ -8,6 +8,7 @@ import logging
 import os
 import time
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,12 +16,19 @@ import numpy as np
 import websockets
 from websockets import ServerConnection
 
-from .diarization import DiarizationBackend, DiarizationTurn, create_diarization_backend, should_diarize_stream
+from .diarization import (
+    DiarizationBackend,
+    DiarizationSpeakerMapper,
+    DiarizationTurn,
+    create_diarization_backend,
+    should_diarize_stream,
+)
 from .protocol_types import (
     AudioChunkMessage,
     ControlMessage,
     ErrorMessage,
     StreamId,
+    TranscriptLayer,
     TranscriptSegment,
     TranscriptUpdateMessage,
 )
@@ -34,6 +42,7 @@ from .speaker_memory import (
 from .speakers import SpeakerTracker
 from .transcription import bytes_per_second, compute_window, eligible_for_transcription
 from .utterances import UtteranceAssembler, UtteranceAssemblerConfig
+from .whisper_backend import TranscriptSegment as WhisperTranscriptSegment
 from .whisper_backend import WhisperBackend, create_backend
 
 
@@ -270,6 +279,13 @@ def _pcm_s16le_bytes_to_float32(pcm: bytes) -> np.ndarray:
     return i16.astype(np.float32) / 32768.0
 
 
+@dataclass(frozen=True)
+class PendingTranscriptWindow:
+    start_offset_bytes: int
+    end_offset_bytes: int
+    segments: tuple[WhisperTranscriptSegment, ...]
+
+
 class ServerState:
     def __init__(self) -> None:
         self.sessions: dict[str, SessionState] = {}
@@ -286,16 +302,59 @@ class ServerState:
             max_duration_sec=_env_float("UTTERANCE_MAX_SEC", 14.0),
             emit_partials=_env_bool("UTTERANCE_EMIT_PARTIALS", True),
         )
-        self.utterance_assemblers: dict[str, UtteranceAssembler] = {}
+        self.utterance_assemblers: dict[tuple[str, StreamId], UtteranceAssembler] = {}
+        self.diarization_mappers: dict[tuple[str, StreamId], DiarizationSpeakerMapper] = {}
+        self.transcription_locks: dict[tuple[str, StreamId], asyncio.Lock] = {}
+        self.pending_transcripts: dict[
+            tuple[str, StreamId],
+            list[PendingTranscriptWindow],
+        ] = {}
         self.speaker_trackers: dict[str, SpeakerTracker] = {}
         self.lock = asyncio.Lock()
 
-    def get_utterance_assembler(self, session_id: str) -> UtteranceAssembler:
-        assembler = self.utterance_assemblers.get(session_id)
+    def get_utterance_assembler(self, session_id: str, stream_id: StreamId) -> UtteranceAssembler:
+        key = (session_id, stream_id)
+        assembler = self.utterance_assemblers.get(key)
         if assembler is None:
-            assembler = UtteranceAssembler(session_id=session_id, config=self.utterance_config)
-            self.utterance_assemblers[session_id] = assembler
+            assembler = UtteranceAssembler(
+                session_id=f"{stream_id}-{session_id}",
+                config=self.utterance_config,
+            )
+            self.utterance_assemblers[key] = assembler
         return assembler
+
+    def get_session_assemblers(self, session_id: str) -> list[UtteranceAssembler]:
+        return [
+            assembler
+            for (candidate_session_id, _), assembler in self.utterance_assemblers.items()
+            if candidate_session_id == session_id
+        ]
+
+    def get_diarization_mapper(self, session_id: str, stream_id: StreamId) -> DiarizationSpeakerMapper:
+        key = (session_id, stream_id)
+        mapper = self.diarization_mappers.get(key)
+        if mapper is None:
+            mapper = DiarizationSpeakerMapper(
+                min_overlap_sec=_env_float("DIARIZATION_MAPPING_MIN_OVERLAP_SEC", 0.2),
+                history_sec=_env_float("DIARIZATION_MAPPING_HISTORY_SEC", 120.0),
+            )
+            self.diarization_mappers[key] = mapper
+        return mapper
+
+    def get_transcription_lock(self, session_id: str, stream_id: StreamId) -> asyncio.Lock:
+        key = (session_id, stream_id)
+        lock = self.transcription_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.transcription_locks[key] = lock
+        return lock
+
+    def get_pending_transcripts(
+        self,
+        session_id: str,
+        stream_id: StreamId,
+    ) -> list[PendingTranscriptWindow]:
+        return self.pending_transcripts.setdefault((session_id, stream_id), [])
 
     def get_speaker_tracker(self, session_id: str) -> SpeakerTracker:
         tracker = self.speaker_trackers.get(session_id)
@@ -304,17 +363,64 @@ class ServerState:
                 local_label=os.environ.get("MIC_SPEAKER_LABEL", "You"),
                 system_label=os.environ.get("SYSTEM_SPEAKER_LABEL", "System audio"),
                 active_speaker_ttl_sec=_env_float("SPEAKER_ACTIVITY_TTL_SEC", 15.0),
+                activity_boundary_tolerance_sec=_env_float(
+                    "SPEAKER_ACTIVITY_BOUNDARY_TOLERANCE_SEC",
+                    0.35,
+                ),
             )
             self.speaker_trackers[session_id] = tracker
         return tracker
 
 
-def _build_transcript_update(session_id: str, segments: list[TranscriptSegment]) -> TranscriptUpdateMessage:
+def _build_transcript_update(
+    session_id: str,
+    segments: list[TranscriptSegment],
+    *,
+    layer: TranscriptLayer = "processed",
+) -> TranscriptUpdateMessage:
     return {
         "type": "transcript_update",
         "session_id": session_id,
+        "layer": layer,
         "segments": segments,
     }
+
+
+def _raw_transcript_segments(
+    state: ServerState,
+    session: SessionState,
+    stream_id: StreamId,
+    segments: list[WhisperTranscriptSegment],
+    *,
+    window_start_offset_bytes: int,
+    bytes_per_sec: int,
+    buf: StreamBuffer,
+) -> list[TranscriptSegment]:
+    epoch_sec = (buf.first_timestamp_ms / 1000.0) if buf.first_timestamp_ms else 0.0
+    base_offset_sec = float(window_start_offset_bytes) / float(bytes_per_sec)
+    speaker = state.get_speaker_tracker(session.session_id).stream_speakers[stream_id]
+    out: list[TranscriptSegment] = []
+    for index, segment in enumerate(segments):
+        text = str(segment.text).strip()
+        if not text:
+            continue
+        out.append(
+            {
+                "id": f"raw-{stream_id}-{window_start_offset_bytes:012d}-{index:03d}",
+                "start_sec": epoch_sec + base_offset_sec + float(segment.start_sec),
+                "end_sec": epoch_sec + base_offset_sec + float(segment.end_sec),
+                "text": text,
+                "stream_tags": [stream_id],
+                "speaker_id": speaker.speaker_id,
+                "speaker_label": speaker.speaker_label,
+                "speaker_source": speaker.speaker_source,
+                "speaker_confidence": speaker.speaker_confidence,
+                "is_final": True,
+                "full_context_available": False,
+                "final_reason": "raw_window",
+            }
+        )
+    return out
 
 
 def _assemble_transcript_segments(
@@ -328,24 +434,63 @@ def _assemble_transcript_segments(
     # Convert client epoch (ms) to seconds; fall back to 0 if not set.
     epoch_sec = (buf.first_timestamp_ms / 1000.0) if buf.first_timestamp_ms else 0.0
     tracker = state.get_speaker_tracker(session.session_id)
-    assembler = state.get_utterance_assembler(session.session_id)
+    assembler = state.get_utterance_assembler(session.session_id, stream_id)
 
     out: list[TranscriptSegment] = []
     for seg in raw_segments:
-        start_sec = float(epoch_sec + base_offset_sec + float(seg.start_sec))
-        end_sec = float(epoch_sec + base_offset_sec + float(seg.end_sec))
-        speaker = tracker.resolve(stream_id=stream_id, start_sec=start_sec, end_sec=end_sec)
-        out.extend(
-            item.to_protocol()
-            for item in assembler.push(
-                stream_id=stream_id,
-                start_sec=start_sec,
-                end_sec=end_sec,
-                text=seg.text,
-                speaker=speaker,
+        words = tuple(getattr(seg, "words", ()) or ())
+        if words:
+            fragments: list[tuple[float, float, str, Any]] = []
+            for word in words:
+                word_start = float(epoch_sec + base_offset_sec + float(word.start_sec))
+                word_end = float(epoch_sec + base_offset_sec + float(word.end_sec))
+                speaker = tracker.resolve(stream_id=stream_id, start_sec=word_start, end_sec=word_end)
+                if fragments and fragments[-1][3].speaker_id == speaker.speaker_id:
+                    previous = fragments[-1]
+                    fragments[-1] = (
+                        previous[0],
+                        max(previous[1], word_end),
+                        _join_transcript_text(previous[2], word.text),
+                        previous[3],
+                    )
+                else:
+                    fragments.append((word_start, word_end, str(word.text).strip(), speaker))
+        else:
+            start_sec = float(epoch_sec + base_offset_sec + float(seg.start_sec))
+            end_sec = float(epoch_sec + base_offset_sec + float(seg.end_sec))
+            fragments = [
+                (
+                    start_sec,
+                    end_sec,
+                    seg.text,
+                    tracker.resolve(stream_id=stream_id, start_sec=start_sec, end_sec=end_sec),
+                )
+            ]
+
+        for start_sec, end_sec, text, speaker in fragments:
+            out.extend(
+                item.to_protocol()
+                for item in assembler.push(
+                    stream_id=stream_id,
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    text=text,
+                    speaker=speaker,
+                )
             )
-        )
     return out
+
+
+def _join_transcript_text(left: str, right: str) -> str:
+    left = str(left).strip()
+    right = str(right).strip()
+    if not left:
+        return right
+    if not right:
+        return left
+    if right[0] in ",.!?:;)]}":
+        return f"{left.rstrip()}{right}"
+    return f"{left.rstrip()} {right.lstrip()}"
 
 
 def _apply_diarization_turns(
@@ -357,11 +502,20 @@ def _apply_diarization_turns(
     buf: StreamBuffer,
     samples: np.ndarray,
     sample_rate_hz: int,
+    replace_start_sec: float | None = None,
+    replace_end_sec: float | None = None,
 ) -> None:
-    if not turns:
-        return
     epoch_sec = (buf.first_timestamp_ms / 1000.0) if buf.first_timestamp_ms else 0.0
     tracker = state.get_speaker_tracker(session.session_id)
+    if replace_start_sec is not None and replace_end_sec is not None:
+        tracker.remove_activities_in_range(
+            stream_id=stream_id,
+            start_sec=epoch_sec + replace_start_sec,
+            end_sec=epoch_sec + replace_end_sec,
+            sources={"diarization", "memory"},
+        )
+    if not turns:
+        return
     for turn in turns:
         start_sec = float(epoch_sec + base_offset_sec + turn.start_sec)
         end_sec = float(epoch_sec + base_offset_sec + turn.end_sec)
@@ -414,11 +568,13 @@ async def _send_transcript_segments(
     session_id: str,
     segments: list[TranscriptSegment],
     sockets: set[ServerConnection],
+    *,
+    layer: TranscriptLayer = "processed",
 ) -> None:
     if not segments or not sockets:
         return
 
-    payload = json.dumps(_build_transcript_update(session_id, segments))
+    payload = json.dumps(_build_transcript_update(session_id, segments, layer=layer))
     dead: list[ServerConnection] = []
     for ws in sockets:
         try:
@@ -553,88 +709,279 @@ async def _transcribe_stream(
     min_new_audio_sec: float,
     window_sec: float,
     max_buffer_sec: float,
+    *,
+    force: bool = False,
 ) -> None:
     """Transcribe a single stream buffer and send updates."""
+    async with state.get_transcription_lock(sess.session_id, stream_id):
+        await _transcribe_stream_locked(
+            state,
+            sess,
+            stream_id,
+            buf,
+            min_new_audio_sec,
+            window_sec,
+            max_buffer_sec,
+            force=force,
+        )
+
+
+async def _transcribe_stream_locked(
+    state: ServerState,
+    sess: SessionState,
+    stream_id: StreamId,
+    buf: StreamBuffer,
+    min_new_audio_sec: float,
+    window_sec: float,
+    max_buffer_sec: float,
+    *,
+    force: bool,
+) -> None:
     bps = bytes_per_second(sess.sample_rate_hz, sess.num_channels)
     if bps <= 0:
         return
 
     buf.trim_to_max_bytes(int(max_buffer_sec * bps))
-
     end_off = buf.buffer_end_offset_bytes()
-    min_new_bytes = int(min_new_audio_sec * bps)
-    if not eligible_for_transcription(end_off, buf.last_transcribed_offset_bytes, min_new_bytes):
-        return
+    idle_sec = (
+        max(0.0, time.time() - buf.last_received_at)
+        if buf.last_received_at is not None
+        else 0.0
+    )
+    min_new_bytes = int(max(0.0, min_new_audio_sec) * bps)
+    raw_ready = end_off > buf.last_transcribed_offset_bytes and (
+        force
+        or idle_sec >= max(0.0, _env_float("RAW_TRANSCRIPT_IDLE_FLUSH_SEC", 0.8))
+        or eligible_for_transcription(
+            end_off,
+            buf.last_transcribed_offset_bytes,
+            min_new_bytes,
+        )
+    )
 
-    window_bytes = int(window_sec * bps)
-    window_start, window_end = compute_window(buf.last_transcribed_offset_bytes, end_off, window_bytes)
+    if raw_ready:
+        window_start, window_end = compute_window(
+            buf.last_transcribed_offset_bytes,
+            end_off,
+            int(window_sec * bps),
+        )
+        rel_start = max(0, window_start - buf.buffer_start_offset_bytes)
+        rel_end = max(rel_start, window_end - buf.buffer_start_offset_bytes)
+        if rel_end > rel_start:
+            pcm = bytes(buf.audio_buffer[rel_start:rel_end])
+            samples = _pcm_s16le_bytes_to_float32(pcm)
+            has_speech = _webrtcvad_window_has_speech(
+                pcm_s16le=pcm,
+                sample_rate_hz=sess.sample_rate_hz,
+                aggressiveness=_env_int("VAD_ML_AGGRESSIVENESS", 2),
+                frame_ms=_env_int("VAD_ML_FRAME_MS", 20),
+                min_speech_ratio=_env_float("VAD_ML_MIN_SPEECH_RATIO", 0.12),
+            ) and _rms_energy(samples) >= _env_float("VAD_RMS_THRESHOLD", 0.003)
 
-    rel_start = window_start - buf.buffer_start_offset_bytes
-    rel_end = window_end - buf.buffer_start_offset_bytes
-    if rel_start < 0:
-        rel_start = 0
-    if rel_end <= rel_start:
-        return
+            raw_segments: list[WhisperTranscriptSegment] = []
+            if has_speech:
+                raw_segments = await asyncio.to_thread(
+                    state.backend.transcribe,
+                    samples,
+                    sess.sample_rate_hz,
+                )
 
-    pcm = bytes(buf.audio_buffer[rel_start:rel_end])
-    samples = _pcm_s16le_bytes_to_float32(pcm)
-    base_offset_sec = float(window_start) / float(bps)
+            pending = PendingTranscriptWindow(
+                start_offset_bytes=window_start,
+                end_offset_bytes=window_end,
+                segments=tuple(raw_segments),
+            )
+            state.get_pending_transcripts(sess.session_id, stream_id).append(pending)
+            buf.last_transcribed_offset_bytes = window_end
 
-    # Always-on VAD gate (Discord-style): WebRTC VAD first, RMS second.
-    # We still advance last_transcribed_offset_bytes when skipping so we don't
-    # keep reprocessing silence/noise.
-    aggressiveness = _env_int("VAD_ML_AGGRESSIVENESS", 2)  # 0..3
-    frame_ms = _env_int("VAD_ML_FRAME_MS", 20)  # 10/20/30
-    min_ratio = _env_float("VAD_ML_MIN_SPEECH_RATIO", 0.12)
-    if not _webrtcvad_window_has_speech(
-        pcm_s16le=pcm,
-        sample_rate_hz=sess.sample_rate_hz,
-        aggressiveness=aggressiveness,
-        frame_ms=frame_ms,
-        min_speech_ratio=min_ratio,
+            async with state.lock:
+                raw_protocol_segments = _raw_transcript_segments(
+                    state,
+                    sess,
+                    stream_id,
+                    raw_segments,
+                    window_start_offset_bytes=window_start,
+                    bytes_per_sec=bps,
+                    buf=buf,
+                )
+                raw_sockets = set(state.session_sockets.get(sess.session_id, set()))
+            await _send_transcript_segments(
+                state,
+                sess.session_id,
+                raw_protocol_segments,
+                raw_sockets,
+                layer="raw",
+            )
+
+    processed = await _process_pending_transcripts(
+        state,
+        sess,
+        stream_id,
+        buf,
+        window_sec,
+        force=force,
+    )
+    while force and processed:
+        processed = await _process_pending_transcripts(
+            state,
+            sess,
+            stream_id,
+            buf,
+            window_sec,
+            force=True,
+        )
+
+
+async def _process_pending_transcripts(
+    state: ServerState,
+    sess: SessionState,
+    stream_id: StreamId,
+    buf: StreamBuffer,
+    window_sec: float,
+    *,
+    force: bool,
+) -> bool:
+    pending = state.get_pending_transcripts(sess.session_id, stream_id)
+    if not pending:
+        return False
+
+    bps = bytes_per_second(sess.sample_rate_hz, sess.num_channels)
+    end_off = buf.buffer_end_offset_bytes()
+    diarization_enabled = state.diarizer is not None and should_diarize_stream(stream_id)
+    diarization_lag_sec = (
+        max(0.0, _env_float("DIARIZATION_LAG_SEC", 4.0))
+        if diarization_enabled
+        else 0.0
+    )
+    processed_lag_sec = max(0.0, _env_float("PROCESSED_TRANSCRIPT_LAG_SEC", 3.0))
+    required_lag_sec = max(processed_lag_sec, diarization_lag_sec)
+    idle_sec = (
+        max(0.0, time.time() - buf.last_received_at)
+        if buf.last_received_at is not None
+        else 0.0
+    )
+    remaining_lag_sec = max(0.0, required_lag_sec - idle_sec)
+    required_lag_bytes = int(remaining_lag_sec * bps)
+    available_end_off = end_off if force else max(
+        buf.buffer_start_offset_bytes,
+        end_off - required_lag_bytes,
+    )
+
+    max_window_bytes = max(1, int(window_sec * bps))
+    group: list[PendingTranscriptWindow] = []
+    group_start = pending[0].start_offset_bytes
+    for item in pending:
+        if item.end_offset_bytes > available_end_off:
+            break
+        if group and item.end_offset_bytes - group_start > max_window_bytes:
+            break
+        group.append(item)
+    if not group:
+        return False
+    has_more_ready = (
+        len(group) < len(pending)
+        and pending[len(group)].end_offset_bytes <= available_end_off
+    )
+
+    min_processed_sec = max(0.0, _env_float("PROCESSED_MIN_NEW_AUDIO_SEC", 2.0))
+    if diarization_enabled:
+        min_processed_sec = max(
+            min_processed_sec,
+            _env_float("DIARIZATION_MIN_NEW_AUDIO_SEC", 4.0),
+        )
+    group_end = group[-1].end_offset_bytes
+    if (
+        not force
+        and group_end - group_start < int(min_processed_sec * bps)
+        and idle_sec < required_lag_sec
+        and not has_more_ready
     ):
-        buf.last_transcribed_offset_bytes = window_end
-        return
+        return False
 
-    thr = _env_float("VAD_RMS_THRESHOLD", 0.003)
-    rms = _rms_energy(samples)
-    if rms < thr:
-        buf.last_transcribed_offset_bytes = window_end
-        return
-
-    diarization_task: asyncio.Task[list[DiarizationTurn]] | None = None
-    if state.diarizer is not None and should_diarize_stream(stream_id):
-        diarization_task = asyncio.create_task(asyncio.to_thread(state.diarizer.diarize, samples, sess.sample_rate_hz))
-
-    # Avoid blocking the event loop.
-    segments = await asyncio.to_thread(state.backend.transcribe, samples, sess.sample_rate_hz)
+    has_transcript = any(item.segments for item in group)
     diarization_turns: list[DiarizationTurn] = []
-    if diarization_task is not None:
+    diarization_completed = False
+    diarization_samples = np.zeros(0, dtype=np.float32)
+    diarization_base_offset_sec = float(group_start) / float(bps)
+    diarization_duration_sec = 0.0
+
+    if diarization_enabled and state.diarizer is not None and has_transcript:
+        diarization_lag_bytes = int(diarization_lag_sec * bps)
+        diarization_context_end = min(end_off, group_end + diarization_lag_bytes)
+        diarization_window_bytes = int(
+            max(window_sec, _env_float("DIARIZATION_WINDOW_SEC", 12.0)) * bps
+        )
+        diarization_start = max(
+            buf.buffer_start_offset_bytes,
+            diarization_context_end - diarization_window_bytes,
+        )
+        relative_start = max(0, diarization_start - buf.buffer_start_offset_bytes)
+        relative_end = max(
+            relative_start,
+            diarization_context_end - buf.buffer_start_offset_bytes,
+        )
+        diarization_pcm = bytes(buf.audio_buffer[relative_start:relative_end])
+        diarization_samples = _pcm_s16le_bytes_to_float32(diarization_pcm)
+        diarization_base_offset_sec = float(diarization_start) / float(bps)
+        diarization_duration_sec = float(diarization_samples.size) / float(sess.sample_rate_hz)
         try:
-            diarization_turns = await diarization_task
+            diarization_turns = await asyncio.to_thread(
+                state.diarizer.diarize,
+                diarization_samples,
+                sess.sample_rate_hz,
+            )
+            diarization_completed = True
         except Exception:
-            logger.exception("diarization failed for session=%s stream=%s", sess.session_id, stream_id)
+            logger.exception(
+                "diarization failed for session=%s stream=%s",
+                sess.session_id,
+                stream_id,
+            )
 
     protocol_segments: list[TranscriptSegment] = []
-    sockets: set[ServerConnection] = set()
-    if segments:
-        async with state.lock:
+    async with state.lock:
+        if diarization_completed:
+            diarization_turns = state.get_diarization_mapper(sess.session_id, stream_id).map_turns(
+                diarization_turns,
+                base_offset_sec=diarization_base_offset_sec,
+                window_duration_sec=diarization_duration_sec,
+            )
             _apply_diarization_turns(
                 state,
                 sess,
                 stream_id,
                 diarization_turns,
-                base_offset_sec,
+                diarization_base_offset_sec,
                 buf,
-                samples,
+                diarization_samples,
                 sess.sample_rate_hz,
+                replace_start_sec=diarization_base_offset_sec,
+                replace_end_sec=diarization_base_offset_sec + diarization_duration_sec,
             )
-            protocol_segments = _assemble_transcript_segments(state, sess, stream_id, segments, base_offset_sec, buf)
-            sockets = set(state.session_sockets.get(sess.session_id, set()))
-    await _send_transcript_segments(state, sess.session_id, protocol_segments, sockets)
+        for item in group:
+            if item.segments:
+                protocol_segments.extend(
+                    _assemble_transcript_segments(
+                        state,
+                        sess,
+                        stream_id,
+                        list(item.segments),
+                        float(item.start_offset_bytes) / float(bps),
+                        buf,
+                    )
+                )
+        sockets = set(state.session_sockets.get(sess.session_id, set()))
 
-    # Commit everything up to window_end.
-    buf.last_transcribed_offset_bytes = window_end
+    del pending[: len(group)]
+    buf.last_processed_offset_bytes = max(buf.last_processed_offset_bytes, group_end)
+    await _send_transcript_segments(
+        state,
+        sess.session_id,
+        protocol_segments,
+        sockets,
+        layer="processed",
+    )
+    return True
 
 
 async def _transcription_loop(state: ServerState) -> None:
@@ -676,13 +1023,57 @@ async def _flush_stale_utterances(state: ServerState) -> None:
     sends: list[tuple[str, list[TranscriptSegment], set[ServerConnection]]] = []
     async with state.lock:
         now_sec = time.time()
-        for session_id, assembler in state.utterance_assemblers.items():
-            segments = [item.to_protocol() for item in assembler.flush_if_stale(now_sec)]
+        for (session_id, stream_id), assembler in state.utterance_assemblers.items():
+            session = state.sessions.get(session_id)
+            if session is None:
+                continue
+            stream_now_sec = session.get_buffer(stream_id).timeline_now_sec(
+                bytes_per_sec=session.bytes_per_second(),
+                wall_now_sec=now_sec,
+            )
+            segments = [item.to_protocol() for item in assembler.flush_if_stale(stream_now_sec)]
             if segments:
                 sends.append((session_id, segments, set(state.session_sockets.get(session_id, set()))))
 
     for session_id, segments, sockets in sends:
         await _send_transcript_segments(state, session_id, segments, sockets)
+
+
+async def _drain_session_audio(state: ServerState, session: SessionState) -> None:
+    min_new_audio_sec = _env_float("MIN_NEW_AUDIO_SEC", 2.0)
+    window_sec = _env_float("WINDOW_SEC", 8.0)
+    max_buffer_sec = _env_float("MAX_BUFFER_SEC", 600.0)
+    for stream_id in (cast(StreamId, "mic"), cast(StreamId, "system")):
+        buf = session.get_buffer(stream_id)
+        while buf.buffer_end_offset_bytes() > buf.last_transcribed_offset_bytes:
+            before = buf.last_transcribed_offset_bytes
+            await _transcribe_stream(
+                state,
+                session,
+                stream_id,
+                buf,
+                min_new_audio_sec,
+                window_sec,
+                max_buffer_sec,
+                force=True,
+            )
+            if buf.last_transcribed_offset_bytes <= before:
+                logger.warning(
+                    "forced transcription made no progress for session=%s stream=%s",
+                    session.session_id,
+                    stream_id,
+                )
+                break
+        await _transcribe_stream(
+            state,
+            session,
+            stream_id,
+            buf,
+            min_new_audio_sec,
+            window_sec,
+            max_buffer_sec,
+            force=True,
+        )
 
 
 async def _handle_control_message(
@@ -716,11 +1107,28 @@ async def _handle_control_message(
     if command == "stop":
         async with state.lock:
             state.session_sockets.setdefault(session_id, set()).add(ws)
-            assembler = state.utterance_assemblers.get(session_id)
-            segments = [item.to_protocol() for item in assembler.flush(reason="stop")] if assembler else []
+            session = state.sessions.get(session_id)
+        if session is not None:
+            await _drain_session_audio(state, session)
+        async with state.lock:
+            segments = [
+                item.to_protocol()
+                for assembler in state.get_session_assemblers(session_id)
+                for item in assembler.flush(reason="stop")
+            ]
             sockets = set(state.session_sockets.get(session_id, set()))
         await _send_transcript_segments(state, session_id, segments, sockets)
         await _send_speaker_memory_review(ws, state, session_id)
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "control",
+                    "session_id": session_id,
+                    "command": "stopped",
+                    "payload": {},
+                }
+            )
+        )
         return
 
     if command == "speaker_memory_review":
@@ -838,6 +1246,7 @@ async def _handle_client(ws: ServerConnection, state: ServerState) -> None:
                     if buf.first_timestamp_ms is None:
                         buf.first_timestamp_ms = int(audio["timestamp_ms"])
                     buf.audio_buffer.extend(pcm_bytes)
+                    buf.last_received_at = now_wall
                     buf.last_seq = max(buf.last_seq, seq_i)
 
                 now = time.monotonic()

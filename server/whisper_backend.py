@@ -32,11 +32,19 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 @dataclass(frozen=True)
+class TranscriptWord:
+    start_sec: float
+    end_sec: float
+    text: str
+
+
+@dataclass(frozen=True)
 class TranscriptSegment:
     start_sec: float
     end_sec: float
     text: str
     stream_tags: list[str]
+    words: tuple[TranscriptWord, ...] = ()
 
 
 class WhisperBackend(Protocol):
@@ -107,6 +115,7 @@ class OpenAIWhisperBackend:
         self.no_speech_threshold = _env_float("WHISPER_NO_SPEECH_THRESHOLD", 0.6)
         self.logprob_threshold = _env_float("WHISPER_LOGPROB_THRESHOLD", -1.0)
         self.compression_ratio_threshold = _env_float("WHISPER_COMPRESSION_RATIO_THRESHOLD", 2.4)
+        self.word_timestamps = _env_bool("WHISPER_WORD_TIMESTAMPS", True)
 
         self._model = whisper.load_model(self.model_name, device=self.device)
 
@@ -127,6 +136,7 @@ class OpenAIWhisperBackend:
             no_speech_threshold=self.no_speech_threshold,
             logprob_threshold=self.logprob_threshold,
             compression_ratio_threshold=self.compression_ratio_threshold,
+            word_timestamps=self.word_timestamps,
         )
 
         out: list[TranscriptSegment] = []
@@ -134,12 +144,22 @@ class OpenAIWhisperBackend:
             text = str(seg.get("text", "")).strip()
             if not text:
                 continue
+            words = tuple(
+                TranscriptWord(
+                    start_sec=float(word.get("start", seg.get("start", 0.0))),
+                    end_sec=float(word.get("end", seg.get("end", 0.0))),
+                    text=str(word.get("word", "")).strip(),
+                )
+                for word in seg.get("words", []) or []
+                if str(word.get("word", "")).strip()
+            )
             out.append(
                 TranscriptSegment(
                     start_sec=float(seg.get("start", 0.0)),
                     end_sec=float(seg.get("end", 0.0)),
                     text=text,
                     stream_tags=["mic"],
+                    words=words,
                 )
             )
         return out
@@ -201,12 +221,22 @@ class HttpWhisperBackend:
 
         segments: list[TranscriptSegment] = []
         for seg in data.get("segments", []):
+            words = tuple(
+                TranscriptWord(
+                    start_sec=float(word.get("start_sec", word.get("start", seg.get("start_sec", 0.0)))),
+                    end_sec=float(word.get("end_sec", word.get("end", seg.get("end_sec", 0.0)))),
+                    text=str(word.get("text", word.get("word", ""))).strip(),
+                )
+                for word in seg.get("words", []) or []
+                if str(word.get("text", word.get("word", ""))).strip()
+            )
             segments.append(
                 TranscriptSegment(
                     start_sec=float(seg.get("start_sec", 0.0)),
                     end_sec=float(seg.get("end_sec", 0.0)),
                     text=str(seg.get("text", "")),
                     stream_tags=["mic"],
+                    words=words,
                 )
             )
         return segments

@@ -6,7 +6,12 @@ from dataclasses import dataclass
 import numpy as np
 
 from server import diarization as diarization_module
-from server.diarization import DiarizationTurn, _turns_from_pyannote_annotation, create_diarization_backend
+from server.diarization import (
+    DiarizationSpeakerMapper,
+    DiarizationTurn,
+    _turns_from_pyannote_annotation,
+    create_diarization_backend,
+)
 from server.main import _load_dotenv
 from server.main import _apply_diarization_turns
 from server.session_state import SessionState, StreamBuffer
@@ -110,8 +115,25 @@ def test_auto_diarization_is_off_without_token(monkeypatch) -> None:
     monkeypatch.delenv("DIARIZATION_HF_TOKEN", raising=False)
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+    monkeypatch.setattr(diarization_module, "sherpa_models_present", lambda: False)
 
     assert create_diarization_backend() is None
+
+
+def test_auto_diarization_uses_local_sherpa_models_without_token(monkeypatch) -> None:
+    class FakeBackend:
+        model_name = "fake-sherpa"
+        device = "cpu"
+
+    fake_backend = FakeBackend()
+    monkeypatch.delenv("DIARIZATION_BACKEND", raising=False)
+    monkeypatch.delenv("DIARIZATION_HF_TOKEN", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+    monkeypatch.setattr(diarization_module, "sherpa_models_present", lambda: True)
+    monkeypatch.setattr(diarization_module, "SherpaOnnxDiarizationBackend", lambda: fake_backend)
+
+    assert create_diarization_backend() is fake_backend
 
 
 def test_auto_diarization_uses_pyannote_when_token_exists(monkeypatch) -> None:
@@ -125,6 +147,48 @@ def test_auto_diarization_uses_pyannote_when_token_exists(monkeypatch) -> None:
     monkeypatch.setattr(diarization_module, "PyannoteDiarizationBackend", lambda: fake_backend)
 
     assert create_diarization_backend() is fake_backend
+
+
+def test_auto_diarization_falls_back_to_sherpa_when_pyannote_cannot_load(monkeypatch) -> None:
+    class FakeBackend:
+        model_name = "fake-sherpa"
+        device = "cpu"
+
+    fake_backend = FakeBackend()
+    monkeypatch.delenv("DIARIZATION_BACKEND", raising=False)
+    monkeypatch.setenv("HF_TOKEN", "token")
+    monkeypatch.setattr(diarization_module, "sherpa_models_present", lambda: True)
+    monkeypatch.setattr(
+        diarization_module,
+        "PyannoteDiarizationBackend",
+        lambda: (_ for _ in ()).throw(RuntimeError("pyannote unavailable")),
+    )
+    monkeypatch.setattr(diarization_module, "SherpaOnnxDiarizationBackend", lambda: fake_backend)
+
+    assert create_diarization_backend() is fake_backend
+
+
+def test_overlapping_windows_keep_speaker_ids_stable_when_backend_labels_flip() -> None:
+    mapper = DiarizationSpeakerMapper(min_overlap_sec=0.1)
+    first = mapper.map_turns(
+        [DiarizationTurn(0.0, 4.0, "local:A", "A")],
+        base_offset_sec=0.0,
+        window_duration_sec=4.0,
+    )
+    second = mapper.map_turns(
+        [
+            DiarizationTurn(0.0, 2.0, "local:B", "B"),
+            DiarizationTurn(2.0, 4.0, "local:A", "A"),
+        ],
+        base_offset_sec=2.0,
+        window_duration_sec=4.0,
+    )
+
+    assert first[0].speaker_id == "diarization:session-speaker-001"
+    assert second[0].speaker_id == first[0].speaker_id
+    assert second[0].speaker_label == "Speaker 1"
+    assert second[1].speaker_id == "diarization:session-speaker-002"
+    assert second[1].speaker_label == "Speaker 2"
 
 
 def test_apply_diarization_turns_anchors_to_client_timestamps() -> None:

@@ -4,6 +4,7 @@ import logging
 import os
 import warnings
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional, Protocol
 
 import numpy as np
@@ -29,6 +30,115 @@ class DiarizationBackend(Protocol):
         returns:
           - speaker turns relative to the provided samples
         """
+
+
+class DiarizationSpeakerMapper:
+    """Keep backend-local cluster labels stable across overlapping windows."""
+
+    def __init__(self, *, min_overlap_sec: float = 0.2, history_sec: float = 120.0) -> None:
+        self.min_overlap_sec = min_overlap_sec
+        self.history_sec = history_sec
+        self._turns: list[DiarizationTurn] = []
+        self._next_speaker = 1
+
+    def map_turns(
+        self,
+        turns: list[DiarizationTurn],
+        *,
+        base_offset_sec: float,
+        window_duration_sec: float,
+    ) -> list[DiarizationTurn]:
+        if not turns:
+            self._replace_history([], base_offset_sec=base_offset_sec, window_duration_sec=window_duration_sec)
+            return []
+
+        local_ids = list(dict.fromkeys(turn.speaker_id for turn in turns))
+        global_ids = list(dict.fromkeys(turn.speaker_id for turn in self._turns))
+        scores: list[tuple[float, str, str]] = []
+        for local_id in local_ids:
+            local_turns = [turn for turn in turns if turn.speaker_id == local_id]
+            local_duration = sum(max(0.0, turn.end_sec - turn.start_sec) for turn in local_turns)
+            for global_id in global_ids:
+                overlap = 0.0
+                for local_turn in local_turns:
+                    absolute_start = base_offset_sec + local_turn.start_sec
+                    absolute_end = base_offset_sec + local_turn.end_sec
+                    for historical_turn in self._turns:
+                        if historical_turn.speaker_id != global_id:
+                            continue
+                        overlap += max(
+                            0.0,
+                            min(absolute_end, historical_turn.end_sec)
+                            - max(absolute_start, historical_turn.start_sec),
+                        )
+                if overlap >= self.min_overlap_sec and overlap >= min(local_duration, 1.0) * 0.25:
+                    scores.append((overlap, local_id, global_id))
+
+        assignments: dict[str, str] = {}
+        assigned_globals: set[str] = set()
+        for _, local_id, global_id in sorted(scores, reverse=True):
+            if local_id in assignments or global_id in assigned_globals:
+                continue
+            assignments[local_id] = global_id
+            assigned_globals.add(global_id)
+
+        labels_by_id = {turn.speaker_id: turn.speaker_label for turn in self._turns}
+        for local_id in local_ids:
+            if local_id in assignments:
+                continue
+            global_id = f"diarization:session-speaker-{self._next_speaker:03d}"
+            self._next_speaker += 1
+            assignments[local_id] = global_id
+            labels_by_id[global_id] = f"Speaker {self._next_speaker - 1}"
+
+        mapped = [
+            DiarizationTurn(
+                start_sec=turn.start_sec,
+                end_sec=turn.end_sec,
+                speaker_id=assignments[turn.speaker_id],
+                speaker_label=labels_by_id.get(
+                    assignments[turn.speaker_id],
+                    f"Speaker {self._speaker_number(assignments[turn.speaker_id])}",
+                ),
+                speaker_confidence=turn.speaker_confidence,
+            )
+            for turn in turns
+        ]
+        self._replace_history(mapped, base_offset_sec=base_offset_sec, window_duration_sec=window_duration_sec)
+        return mapped
+
+    def _replace_history(
+        self,
+        turns: list[DiarizationTurn],
+        *,
+        base_offset_sec: float,
+        window_duration_sec: float,
+    ) -> None:
+        window_end_sec = base_offset_sec + max(0.0, window_duration_sec)
+        keep_after_sec = window_end_sec - self.history_sec
+        historical = [
+            turn
+            for turn in self._turns
+            if turn.end_sec <= base_offset_sec and turn.end_sec >= keep_after_sec
+        ]
+        historical.extend(
+            DiarizationTurn(
+                start_sec=base_offset_sec + turn.start_sec,
+                end_sec=base_offset_sec + turn.end_sec,
+                speaker_id=turn.speaker_id,
+                speaker_label=turn.speaker_label,
+                speaker_confidence=turn.speaker_confidence,
+            )
+            for turn in turns
+        )
+        self._turns = historical
+
+    @staticmethod
+    def _speaker_number(speaker_id: str) -> int:
+        try:
+            return int(speaker_id.rsplit("-", 1)[-1])
+        except ValueError:
+            return 0
 
 
 class PyannoteDiarizationBackend:
@@ -87,18 +197,118 @@ class PyannoteDiarizationBackend:
         return _turns_from_pyannote_annotation(annotation, min_turn_sec=self.min_turn_sec)
 
 
+class SherpaOnnxDiarizationBackend:
+    """Token-free local diarization using sherpa-onnx models."""
+
+    def __init__(
+        self,
+        *,
+        segmentation_model: str | Path | None = None,
+        embedding_model: str | Path | None = None,
+    ) -> None:
+        import sherpa_onnx  # type: ignore
+
+        default_segmentation, default_embedding = default_sherpa_model_paths()
+        self.segmentation_model = Path(
+            segmentation_model
+            or os.environ.get("DIARIZATION_SEGMENTATION_MODEL", "")
+            or default_segmentation
+        ).expanduser()
+        self.embedding_model = Path(
+            embedding_model
+            or os.environ.get("DIARIZATION_EMBEDDING_MODEL", "")
+            or default_embedding
+        ).expanduser()
+        self.device = "cpu"
+        self.model_name = "sherpa-onnx/pyannote-segmentation-3.0+3dspeaker"
+        self.min_turn_sec = _env_float("DIARIZATION_MIN_TURN_SEC", 0.2)
+        num_speakers = _env_int_optional("DIARIZATION_NUM_SPEAKERS")
+        min_speakers = _env_int_optional("DIARIZATION_MIN_SPEAKERS")
+        max_speakers = _env_int_optional("DIARIZATION_MAX_SPEAKERS")
+        if num_speakers is None and min_speakers is not None and min_speakers == max_speakers:
+            num_speakers = min_speakers
+
+        if not self.segmentation_model.is_file() or not self.embedding_model.is_file():
+            raise RuntimeError(
+                "sherpa-onnx diarization models are missing; run `make setup-diarization` "
+                "or set DIARIZATION_SEGMENTATION_MODEL and DIARIZATION_EMBEDDING_MODEL"
+            )
+
+        num_threads = max(1, _env_int("DIARIZATION_NUM_THREADS", min(4, os.cpu_count() or 1)))
+        config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
+            segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
+                pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
+                    model=str(self.segmentation_model)
+                ),
+                num_threads=num_threads,
+                provider="cpu",
+            ),
+            embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+                model=str(self.embedding_model),
+                num_threads=num_threads,
+                provider="cpu",
+            ),
+            clustering=sherpa_onnx.FastClusteringConfig(
+                num_clusters=num_speakers if num_speakers is not None else -1,
+                threshold=_env_float("DIARIZATION_CLUSTER_THRESHOLD", 0.5),
+            ),
+            min_duration_on=self.min_turn_sec,
+            min_duration_off=_env_float("DIARIZATION_MIN_SILENCE_SEC", 0.3),
+        )
+        if not config.validate():
+            raise RuntimeError("invalid sherpa-onnx diarization configuration")
+        self._diarizer = sherpa_onnx.OfflineSpeakerDiarization(config)
+
+    def diarize(self, samples: np.ndarray, sample_rate: int) -> list[DiarizationTurn]:
+        audio = _prepare_audio(samples=samples, sample_rate=sample_rate, target_rate=16_000)
+        result = self._diarizer.process(audio).sort_by_start_time()
+        return [
+            DiarizationTurn(
+                start_sec=float(turn.start),
+                end_sec=float(turn.end),
+                speaker_id=f"diarization:sherpa-{int(turn.speaker):02d}",
+                speaker_label=f"Speaker {int(turn.speaker) + 1}",
+                speaker_confidence=0.75,
+            )
+            for turn in result
+            if float(turn.end) - float(turn.start) >= self.min_turn_sec
+        ]
+
+
 def create_diarization_backend() -> Optional[DiarizationBackend]:
     backend = os.environ.get("DIARIZATION_BACKEND", "auto").strip().lower() or "auto"
     if backend in ("0", "false", "off", "disabled", "none"):
         return None
 
     try:
-        if backend == "auto" and not _hf_token_present():
-            logger.info("diarization backend: auto disabled; no Hugging Face token found")
+        if backend == "auto":
+            pyannote_error: Exception | None = None
+            if _hf_token_present():
+                try:
+                    out = PyannoteDiarizationBackend()
+                    logger.info("diarization backend: pyannote model=%s device=%s", out.model_name, out.device)
+                    return out
+                except Exception as exc:
+                    pyannote_error = exc
+                    logger.warning(
+                        "pyannote diarization is unavailable; trying local sherpa-onnx models",
+                        exc_info=True,
+                    )
+            if sherpa_models_present():
+                out = SherpaOnnxDiarizationBackend()
+                logger.info("diarization backend: sherpa-onnx model=%s device=%s", out.model_name, out.device)
+                return out
+            if pyannote_error is not None:
+                raise pyannote_error
+            logger.info("diarization backend: auto disabled; local models are not installed")
             return None
-        if backend in ("auto", "1", "true", "on", "enabled", "pyannote", "pyannote-community", "community"):
+        if backend in ("1", "true", "on", "enabled", "pyannote", "pyannote-community", "community"):
             out = PyannoteDiarizationBackend()
             logger.info("diarization backend: pyannote model=%s device=%s", out.model_name, out.device)
+            return out
+        if backend in ("sherpa", "sherpa-onnx", "onnx"):
+            out = SherpaOnnxDiarizationBackend()
+            logger.info("diarization backend: sherpa-onnx model=%s device=%s", out.model_name, out.device)
             return out
         raise ValueError(f"unsupported DIARIZATION_BACKEND={backend!r}")
     except Exception:
@@ -112,6 +322,22 @@ def should_diarize_stream(stream_id: str) -> bool:
     streams = os.environ.get("DIARIZATION_STREAMS", "system")
     allowed = {item.strip().lower() for item in streams.split(",") if item.strip()}
     return stream_id.lower() in allowed
+
+
+def default_sherpa_model_paths() -> tuple[Path, Path]:
+    cache_root = Path(
+        os.environ.get("CADENCE_MODEL_CACHE", "")
+        or (Path.home() / ".cache" / "cadence" / "diarization")
+    ).expanduser()
+    return (
+        cache_root / "sherpa-onnx-pyannote-segmentation-3-0" / "model.int8.onnx",
+        cache_root / "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+    )
+
+
+def sherpa_models_present() -> bool:
+    segmentation_model, embedding_model = default_sherpa_model_paths()
+    return segmentation_model.is_file() and embedding_model.is_file()
 
 
 def _turns_from_pyannote_annotation(annotation: Any, *, min_turn_sec: float) -> list[DiarizationTurn]:
@@ -235,6 +461,17 @@ def _env_float(name: str, default: float) -> float:
         return default
     try:
         return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using %s", name, raw, default)
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
     except ValueError:
         logger.warning("Invalid %s=%r; using %s", name, raw, default)
         return default

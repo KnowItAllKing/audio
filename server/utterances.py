@@ -259,6 +259,12 @@ def _complete_sentence_pieces(text: str) -> tuple[list[tuple[str, int]], str, in
     i = 0
     while i < len(text):
         if text[i] in ".?!":
+            if text[i] == "." and (
+                (i > 0 and text[i - 1] == ".")
+                or (i + 1 < len(text) and text[i + 1] == ".")
+            ):
+                i += 1
+                continue
             end = i + 1
             while end < len(text) and text[end] in "\"')]}":
                 end += 1

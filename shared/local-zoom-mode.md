@@ -7,7 +7,7 @@ Use this when you cannot create or authorize a Zoom RTMS app.
 ```txt
 Zoom speaker output -> virtual loopback input -> system stream
 Your microphone -> mic stream
-Pyannote diarization -> Speaker 1 / Speaker 2 labels
+Local diarization -> Speaker 1 / Speaker 2 labels
 Optional manual current speaker label -> speaker_activity
 Whisper -> phrase transcript
 ```
@@ -36,22 +36,23 @@ Whisper -> phrase transcript
 
 ## Speaker Labels
 
-Without RTMS, Zoom does not send participant metadata to this app. Pyannote
-diarization can split mixed system audio into anonymous speaker labels:
+Without RTMS, Zoom does not send participant metadata to this app. Local
+diarization can split mixed system audio into anonymous speaker labels. The
+default Sherpa-ONNX setup does not require an account or token:
 
 ```bash
-uv sync --project server --extra dev --extra diarization
-
-DIARIZATION_HF_TOKEN=<hugging-face-token> \
-DIARIZATION_STREAMS=system \
+make setup-diarization
 PYTHONPATH=. uv run --project server --extra diarization python -m server.main
 ```
 
-`server.main` loads `server/.env`, so normal local use can keep the token there.
+If pyannote Community-1 is preferred, install `diarization-pyannote`, accept
+the model access terms, and set `DIARIZATION_BACKEND=pyannote`. `server.main`
+loads `server/.env`, so normal local use can keep the Hugging Face token there.
 Set `DIARIZATION_BACKEND=off` to disable diarization.
 
-Accept Hugging Face access terms for `pyannote/speaker-diarization-community-1`
-before running this.
+The default four-second diarization lag gives the model some future context for
+better turn boundaries. Increase `DIARIZATION_LAG_SEC` when accuracy matters
+more than latency, or reduce it for faster partial labels.
 
 Manual labels are in the app's advanced speaker-label controls. Use them only
 when you want known names instead of anonymous labels:

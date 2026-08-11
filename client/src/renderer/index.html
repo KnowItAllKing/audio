@@ -43,7 +43,10 @@
       html,
       body {
         margin: 0;
+        width: 100%;
+        height: 100%;
         min-height: 100%;
+        overflow: clip;
         background: var(--desktop);
         color: var(--text);
         font-family: "Avenir Next", "Hanken Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -62,6 +65,12 @@
 
       button {
         cursor: pointer;
+      }
+
+      button:focus-visible,
+      summary:focus-visible {
+        outline: 3px solid rgba(47, 111, 79, 0.22);
+        outline-offset: 2px;
       }
 
       label {
@@ -133,6 +142,8 @@
       }
 
       .app {
+        position: fixed;
+        inset: 0;
         display: flex;
         flex-direction: column;
         width: 100%;
@@ -218,19 +229,32 @@
         flex: 1;
         min-height: 0;
         display: grid;
-        grid-template-columns: minmax(320px, 372px) minmax(0, 1fr);
+        grid-template-columns: minmax(310px, 350px) minmax(0, 1fr);
       }
 
       .rail {
         min-height: 0;
-        overflow: auto;
-        padding: 24px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        padding: 20px 16px 16px 20px;
         border-right: 1px solid var(--line);
         background: #f7f4ef;
       }
 
       .railHeader {
-        margin-bottom: 18px;
+        flex: none;
+        margin: 0 4px 14px;
+      }
+
+      .railScroll {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-gutter: stable;
+        margin-top: 14px;
+        padding-right: 4px;
       }
 
       .eyebrow {
@@ -257,8 +281,7 @@
         padding: 17px 18px;
       }
 
-      .sourceCard + .sourceCard,
-      .sessionCard {
+      .railScroll > * + * {
         margin-top: 14px;
       }
 
@@ -487,6 +510,9 @@
       }
 
       .advancedControls > summary {
+        display: flex;
+        align-items: center;
+        min-height: 34px;
         cursor: pointer;
         color: var(--muted);
         font-size: 12px;
@@ -637,6 +663,143 @@
         background: #f7f4ef;
       }
 
+      .toolActions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .jumpLatestButton {
+        min-height: 34px;
+        border: 1px solid var(--green-line);
+        border-radius: 8px;
+        background: var(--green-soft);
+        color: var(--green);
+        padding: 5px 11px;
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .jumpLatestButton[hidden] {
+        display: none;
+      }
+
+      .copyTranscriptButton {
+        min-height: 34px;
+        border: 1px solid var(--line-strong);
+        border-radius: 8px;
+        background: #fff;
+        color: var(--text-soft);
+        padding: 5px 11px;
+        font-size: 12px;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+
+      .copyTranscriptButton.copied {
+        border-color: var(--green-line);
+        background: var(--green-soft);
+        color: var(--green);
+      }
+
+      .copyTranscriptButton.failed {
+        border-color: #e4b9a9;
+        background: var(--bad-soft);
+        color: var(--bad);
+      }
+
+      .copyTranscriptButton:disabled {
+        cursor: default;
+        opacity: 0.48;
+      }
+
+      .askAiButton {
+        min-height: 34px;
+        border: 1px solid var(--green-line);
+        border-radius: 8px;
+        background: var(--green-soft);
+        color: var(--green);
+        padding: 5px 12px;
+        font-size: 12px;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+
+      .layerControls {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+      }
+
+      .layerSwitch {
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        padding: 3px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #ebe7df;
+      }
+
+      .layerButton {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        min-height: 36px;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: var(--muted);
+        padding: 5px 10px;
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .layerButton.active {
+        background: #fff;
+        color: var(--text);
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      }
+
+      .layerDot {
+        display: block;
+        flex: none;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--muted-2);
+      }
+
+      #layerRawBtn.active .layerDot {
+        background: var(--green);
+        box-shadow: 0 0 0 3px var(--green-soft);
+      }
+
+      #layerProcessedBtn.active .layerDot {
+        background: var(--blue);
+        box-shadow: 0 0 0 3px var(--blue-soft);
+      }
+
+      .layerCount {
+        min-width: 19px;
+        padding: 1px 5px;
+        border-radius: 10px;
+        background: #eeeae3;
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 10px;
+        text-align: center;
+      }
+
+      .layerDescription {
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 11px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       .toolStat {
         display: flex;
         align-items: center;
@@ -646,7 +809,7 @@
       }
 
       .viewButton {
-        min-height: 27px;
+        min-height: 34px;
         border: 0;
         border-radius: 7px;
         background: transparent;
@@ -666,11 +829,13 @@
         flex: 1;
         min-height: 0;
         overflow: auto;
+        overscroll-behavior: contain;
+        scrollbar-gutter: stable;
         padding: 26px 30px;
       }
 
       .transcript:empty::before {
-        content: "No transcript yet.";
+        content: attr(data-empty-message);
         display: grid;
         place-items: center;
         min-height: 100%;
@@ -835,7 +1000,376 @@
         font-size: 12px;
       }
 
-      @media (max-width: 920px) {
+      .aiPanel {
+        position: fixed;
+        z-index: 30;
+        top: 58px;
+        right: 0;
+        bottom: 0;
+        width: min(620px, calc(100vw - 330px));
+        min-width: 470px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        border-left: 1px solid var(--line-strong);
+        background: var(--surface-2);
+        box-shadow: -18px 0 46px rgba(40, 33, 24, 0.18);
+      }
+
+      .aiPanel[hidden] {
+        display: none;
+      }
+
+      .aiPanelHeader {
+        flex: none;
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 18px 20px 14px;
+        border-bottom: 1px solid var(--line);
+        background: #fff;
+      }
+
+      .aiPanelTitle {
+        margin: 3px 0 2px;
+        font-size: 20px;
+        line-height: 1.2;
+      }
+
+      .aiPanelSubtitle {
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .iconButton {
+        flex: none;
+        width: 32px;
+        height: 32px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface-2);
+        color: var(--text-soft);
+        font-size: 18px;
+        line-height: 1;
+      }
+
+      .aiSetup {
+        flex: none;
+        display: grid;
+        grid-template-columns: minmax(110px, 0.8fr) minmax(140px, 1.2fr) auto;
+        align-items: end;
+        gap: 9px;
+        padding: 12px 20px;
+        border-bottom: 1px solid var(--line);
+        background: #f7f4ef;
+      }
+
+      .aiSetup label {
+        margin-bottom: 5px;
+        font-size: 10px;
+      }
+
+      .aiSetup select {
+        height: 34px;
+        background: #fff;
+      }
+
+      .aiNewButton,
+      .aiSendButton,
+      .aiSyncButton,
+      .aiCancelButton {
+        min-height: 34px;
+        border: 1px solid var(--green-line);
+        border-radius: 8px;
+        background: var(--green);
+        color: #fff;
+        padding: 6px 12px;
+        font-size: 12px;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+
+      .aiSyncButton,
+      .aiCancelButton {
+        border-color: var(--line-strong);
+        background: #fff;
+        color: var(--text-soft);
+      }
+
+      .aiCancelButton {
+        border-color: #e4b9a9;
+        color: var(--bad);
+      }
+
+      .aiNewButton:disabled,
+      .aiSendButton:disabled,
+      .aiSyncButton:disabled,
+      .aiCancelButton:disabled {
+        cursor: default;
+        opacity: 0.48;
+      }
+
+      .aiStatusBar {
+        flex: none;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 8px 20px;
+        border-bottom: 1px solid var(--line);
+        background: #fff;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .aiStatusBar .bad {
+        color: var(--bad);
+      }
+
+      .aiRefreshButton {
+        border: 0;
+        background: transparent;
+        color: var(--green);
+        padding: 2px 0;
+        font-size: 11px;
+        font-weight: 750;
+      }
+
+      .aiTabs {
+        flex: none;
+        display: flex;
+        gap: 6px;
+        overflow-x: auto;
+        padding: 9px 12px;
+        border-bottom: 1px solid var(--line);
+        background: #eee9e1;
+        scrollbar-width: thin;
+      }
+
+      .aiTab {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        max-width: 220px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #f7f4ef;
+      }
+
+      .aiTab.active {
+        border-color: var(--green-line);
+        background: #fff;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+      }
+
+      .aiTabSelect,
+      .aiTabClose {
+        border: 0;
+        background: transparent;
+      }
+
+      .aiTabSelect {
+        min-width: 0;
+        overflow: hidden;
+        padding: 8px 4px 8px 10px;
+        color: var(--text-soft);
+        font-size: 11px;
+        font-weight: 750;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .aiTab.active .aiTabSelect {
+        color: var(--text);
+      }
+
+      .aiTabClose {
+        flex: none;
+        padding: 7px 8px;
+        color: var(--muted);
+        font-size: 15px;
+      }
+
+      .aiBody {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .aiEmpty {
+        flex: 1;
+        display: grid;
+        place-items: center;
+        padding: 36px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.5;
+        text-align: center;
+      }
+
+      .aiEmpty[hidden],
+      .aiConversation[hidden] {
+        display: none;
+      }
+
+      .aiConversation {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .aiThreadMeta {
+        flex: none;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 9px 16px;
+        border-bottom: 1px solid var(--line);
+        background: var(--blue-soft);
+        color: var(--blue);
+        font-size: 11px;
+      }
+
+      .aiTranscriptState {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .aiMessages {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        padding: 18px 20px 8px;
+      }
+
+      .aiMessage {
+        max-width: 88%;
+        margin: 0 0 13px;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        background: #fff;
+        color: var(--text);
+        font-size: 13px;
+        line-height: 1.48;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .aiMessage.user {
+        margin-left: auto;
+        border-color: var(--green-line);
+        background: var(--green-soft);
+      }
+
+      .aiMessage.status {
+        max-width: 100%;
+        border-style: dashed;
+        background: transparent;
+        color: var(--muted);
+        font-size: 11px;
+        text-align: center;
+      }
+
+      .aiMessage.error {
+        max-width: 100%;
+        border-color: #eccdbf;
+        background: var(--bad-soft);
+        color: var(--bad);
+      }
+
+      .aiThinking {
+        color: var(--muted);
+        font-size: 12px;
+        font-style: italic;
+      }
+
+      .aiComposer {
+        flex: none;
+        padding: 12px 16px 14px;
+        border-top: 1px solid var(--line);
+        background: #fff;
+      }
+
+      .aiDisclosure {
+        margin-bottom: 8px;
+        color: var(--muted);
+        font-size: 10px;
+        line-height: 1.35;
+      }
+
+      .aiQuestion {
+        width: 100%;
+        min-height: 76px;
+        max-height: 180px;
+        resize: vertical;
+        border: 1px solid var(--line-strong);
+        border-radius: 9px;
+        background: var(--surface-2);
+        color: var(--text);
+        outline: none;
+        padding: 10px 11px;
+        font: inherit;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .aiQuestion:focus {
+        border-color: var(--green-line);
+        box-shadow: 0 0 0 3px rgba(47, 111, 79, 0.1);
+      }
+
+      .aiComposerActions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 8px;
+      }
+
+      @media (max-width: 1080px) {
+        .workspace {
+          grid-template-columns: 310px minmax(0, 1fr);
+        }
+
+        .layerDescription {
+          display: none;
+        }
+
+        .transcriptHeader,
+        .transcriptTools,
+        .footerBar {
+          padding-left: 20px;
+          padding-right: 20px;
+        }
+
+        .transcript {
+          padding-left: 20px;
+          padding-right: 20px;
+        }
+
+        .toolActions {
+          gap: 5px;
+        }
+
+        .viewButton {
+          padding-left: 8px;
+          padding-right: 8px;
+        }
+
+        .copyLongLabel {
+          display: none;
+        }
+      }
+
+      @media (max-width: 800px) {
         body {
           padding: 0;
         }
@@ -874,11 +1408,18 @@
         }
 
         .rail {
+          display: block;
           flex: none;
           overflow: visible;
           border-right: 0;
           border-bottom: 1px solid var(--line);
           padding: 24px 18px;
+        }
+
+        .railScroll {
+          overflow: visible;
+          margin-top: 14px;
+          padding-right: 0;
         }
 
         .mainPane {
@@ -909,6 +1450,22 @@
         .footerBar {
           padding-left: 18px;
           padding-right: 18px;
+        }
+
+        .transcriptTools {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .layerControls {
+          width: 100%;
+          flex-wrap: wrap;
+        }
+
+        .aiPanel {
+          top: 0;
+          width: 100vw;
+          min-width: 0;
         }
       }
     </style>
@@ -977,6 +1534,7 @@
             </details>
           </section>
 
+          <div class="railScroll" aria-label="Audio sources and speaker memory">
           <section class="sessionCard">
             <div class="cardHead">
               <div>
@@ -1051,6 +1609,8 @@
             </div>
           </section>
 
+          </div>
+
         </aside>
 
         <main class="mainPane">
@@ -1062,21 +1622,101 @@
           </div>
 
           <div class="transcriptTools">
-            <div class="toolStat" aria-label="Transcript view">
-              <button id="viewBubblesBtn" class="viewButton active" type="button">Bubbles</button>
-              <button id="viewBlocksBtn" class="viewButton" type="button">Blocks</button>
-              <button id="viewScriptBtn" class="viewButton" type="button">Script</button>
+            <div class="layerControls">
+              <div class="layerSwitch" aria-label="Transcript layer">
+                <button id="layerRawBtn" class="layerButton active" type="button" aria-pressed="true">
+                  <i class="layerDot" aria-hidden="true"></i>
+                  <span>Raw</span>
+                  <span id="rawLayerCount" class="layerCount">0</span>
+                </button>
+                <button id="layerProcessedBtn" class="layerButton" type="button" aria-pressed="false">
+                  <i class="layerDot" aria-hidden="true"></i>
+                  <span>Processed</span>
+                  <span id="processedLayerCount" class="layerCount">0</span>
+                </button>
+              </div>
+              <span id="layerDescription" class="layerDescription">Immediate ASR · source labels</span>
+            </div>
+            <div class="toolActions">
+              <button id="jumpLatestBtn" class="jumpLatestButton" type="button" hidden>↓ Latest</button>
+              <button
+                id="copyTranscriptBtn"
+                class="copyTranscriptButton"
+                type="button"
+                aria-label="Copy clean processed transcript"
+                aria-live="polite"
+                title="Copy names and dialogue from the Processed transcript"
+                disabled
+              >Copy<span class="copyLongLabel"> clean</span></button>
+              <button id="askAiBtn" class="askAiButton" type="button">Ask AI</button>
+              <div class="toolStat" aria-label="Transcript view">
+                <button id="viewBubblesBtn" class="viewButton active" type="button">Bubbles</button>
+                <button id="viewBlocksBtn" class="viewButton" type="button">Blocks</button>
+                <button id="viewScriptBtn" class="viewButton" type="button">Script</button>
+              </div>
             </div>
           </div>
 
-          <div id="transcript" class="transcript"></div>
+          <div id="transcript" class="transcript layer-raw" data-empty-message="Listening for speech…"></div>
 
           <div class="footerBar">
-            <span>Stored locally</span>
-            <span>Raw audio off</span>
+            <span>Processed transcript is the saved record</span>
+            <span>Raw audio is never stored</span>
           </div>
         </main>
       </div>
+
+      <aside id="aiPanel" class="aiPanel" aria-label="AI transcript Q and A" hidden>
+        <div class="aiPanelHeader">
+          <div>
+            <div class="eyebrow">Processed transcript</div>
+            <h2 class="aiPanelTitle">AI Q&amp;A</h2>
+            <div class="aiPanelSubtitle">Durable local CLI threads · close a tab to forget it in Cadence</div>
+          </div>
+          <button id="aiPanelCloseBtn" class="iconButton" type="button" aria-label="Close AI panel">×</button>
+        </div>
+
+        <div class="aiSetup">
+          <div>
+            <label for="aiProviderSelect">Provider</label>
+            <select id="aiProviderSelect">
+              <option value="codex">Codex</option>
+              <option value="claude">Claude</option>
+            </select>
+          </div>
+          <div>
+            <label for="aiModelSelect">Model</label>
+            <select id="aiModelSelect"></select>
+          </div>
+          <button id="aiNewThreadBtn" class="aiNewButton" type="button">New thread</button>
+        </div>
+
+        <div class="aiStatusBar">
+          <span id="aiCliStatus">Checking installed CLIs…</span>
+          <button id="aiRefreshStatusBtn" class="aiRefreshButton" type="button">Refresh</button>
+        </div>
+
+        <div id="aiTabs" class="aiTabs" role="tablist" aria-label="AI threads"></div>
+
+        <div class="aiBody">
+          <div id="aiEmpty" class="aiEmpty">Choose a provider and start a thread. Your first question sends the current clean Processed transcript.</div>
+          <div id="aiConversation" class="aiConversation" hidden>
+            <div class="aiThreadMeta">
+              <span id="aiTranscriptState" class="aiTranscriptState"></span>
+              <button id="aiSyncBtn" class="aiSyncButton" type="button">Sync transcript</button>
+            </div>
+            <div id="aiMessages" class="aiMessages" aria-live="polite"></div>
+            <div class="aiComposer">
+              <div class="aiDisclosure">The clean Processed transcript is sent to the selected CLI/model when needed. Transcript text is treated as untrusted context.</div>
+              <textarea id="aiQuestion" class="aiQuestion" placeholder="Ask about decisions, action items, or details…"></textarea>
+              <div class="aiComposerActions">
+                <button id="aiCancelBtn" class="aiCancelButton" type="button" hidden>Cancel</button>
+                <button id="aiSendBtn" class="aiSendButton" type="button">Send</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
     </div>
 
     <script type="module" src="./renderer.ts"></script>
