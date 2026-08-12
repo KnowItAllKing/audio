@@ -535,6 +535,27 @@
         margin-top: 12px;
       }
 
+      .savedVoiceList {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin: 10px 0;
+      }
+
+      .savedVoiceList:empty {
+        display: none;
+      }
+
+      .savedVoiceChip {
+        padding: 4px 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: #fff;
+        color: var(--text-soft);
+        font-size: 11px;
+        font-weight: 700;
+      }
+
       .memorySample {
         border: 1px solid var(--line);
         border-radius: 8px;
@@ -1519,6 +1540,7 @@
               </div>
               <span id="memoryStatus" class="pill">idle</span>
             </div>
+            <div id="savedVoiceList" class="savedVoiceList" aria-label="Saved voices"></div>
             <button id="memoryReviewBtn" class="actionButton" type="button">Review voices</button>
             <div id="speakerReviewList" class="memoryList"></div>
           </section>

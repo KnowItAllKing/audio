@@ -6,6 +6,7 @@ import {
 import { MicInputFilter, getAudioStats, type MicInputFilterDecision } from "./audio/MicInputFilter";
 import {
   loadSpeakerMemoryProfiles,
+  normalizeSpeakerMemoryProfiles,
   saveSpeakerMemoryProfiles,
   type SpeakerMemoryProfile
 } from "./SpeakerMemoryStore";
@@ -125,6 +126,7 @@ const startBtn = $<HTMLButtonElement>("startBtn");
 const stopBtn = $<HTMLButtonElement>("stopBtn");
 const memoryReviewBtn = $<HTMLButtonElement>("memoryReviewBtn");
 const memoryStatusEl = $<HTMLSpanElement>("memoryStatus");
+const savedVoiceListEl = $<HTMLDivElement>("savedVoiceList");
 const speakerReviewListEl = $<HTMLDivElement>("speakerReviewList");
 const transcriptEl = $<HTMLDivElement>("transcript");
 const speakerLegendEl = $<HTMLDivElement>("speakerLegend");
@@ -273,6 +275,8 @@ let resolveStopAck: ((received: boolean) => void) | null = null;
 
 const rawSegmentsById = new Map<string, TranscriptSegment>();
 const processedSegmentsById = new Map<string, TranscriptSegment>();
+let speakerMemoryProfiles = loadSpeakerMemoryProfiles();
+let speakerMemorySaveChain = Promise.resolve();
 let recvCount = 0;
 let transcriptViewMode: "bubbles" | "blocks" | "script" = "bubbles";
 let transcriptLayer: TranscriptLayer = "raw";
@@ -343,6 +347,15 @@ function waitForStopAck(timeoutMs = 120_000): Promise<boolean> {
 }
 
 function updateSpeakerMemoryStatus(profiles: SpeakerMemoryProfile[]): void {
+  savedVoiceListEl.replaceChildren(
+    ...profiles.map((profile) => {
+      const chip = document.createElement("span");
+      chip.className = "savedVoiceChip";
+      chip.textContent = profile.name;
+      chip.title = `${profile.sample_count} saved sample${profile.sample_count === 1 ? "" : "s"}`;
+      return chip;
+    })
+  );
   if (profiles.length === 0) {
     memoryStatusEl.textContent = "no saved voices";
     memoryStatusEl.classList.remove("good", "bad");
@@ -354,16 +367,59 @@ function updateSpeakerMemoryStatus(profiles: SpeakerMemoryProfile[]): void {
 }
 
 function syncSpeakerMemoryProfiles(): void {
-  const profiles = loadSpeakerMemoryProfiles();
-  updateSpeakerMemoryStatus(profiles);
-  sendControl("speaker_memory_profiles", { profiles });
+  updateSpeakerMemoryStatus(speakerMemoryProfiles);
+  sendControl("speaker_memory_profiles", { profiles: speakerMemoryProfiles });
 }
 
 function storeSpeakerMemoryProfiles(profiles: SpeakerMemoryProfile[]): SpeakerMemoryProfile[] {
   const saved = saveSpeakerMemoryProfiles(profiles);
+  speakerMemoryProfiles = saved;
   updateSpeakerMemoryStatus(saved);
+  queueSpeakerMemorySave(saved);
   return saved;
 }
+
+function queueSpeakerMemorySave(profiles: SpeakerMemoryProfile[]): void {
+  if (!window.audioClient?.saveSpeakerMemoryProfiles) return;
+  const snapshot = structuredClone(profiles);
+  speakerMemorySaveChain = speakerMemorySaveChain
+    .then(async () => {
+      const result = await window.audioClient.saveSpeakerMemoryProfiles(snapshot);
+      if (!result.saved) throw new Error(result.error || "speaker memory save failed");
+    })
+    .catch((error) => {
+      memoryStatusEl.textContent = "voice save failed";
+      memoryStatusEl.classList.add("bad");
+      memoryStatusEl.classList.remove("good");
+      console.error("Could not persist speaker memory", error);
+    });
+}
+
+async function initializeSpeakerMemoryProfiles(): Promise<void> {
+  if (!window.audioClient?.loadSpeakerMemoryProfiles) {
+    updateSpeakerMemoryStatus(speakerMemoryProfiles);
+    return;
+  }
+
+  try {
+    const result = await window.audioClient.loadSpeakerMemoryProfiles();
+    if (!result.loaded) throw new Error(result.error || "speaker memory load failed");
+    if (result.found) {
+      speakerMemoryProfiles = normalizeSpeakerMemoryProfiles(result.profiles);
+      saveSpeakerMemoryProfiles(speakerMemoryProfiles);
+    } else if (speakerMemoryProfiles.length > 0) {
+      queueSpeakerMemorySave(speakerMemoryProfiles);
+    }
+    updateSpeakerMemoryStatus(speakerMemoryProfiles);
+  } catch (error) {
+    memoryStatusEl.textContent = "voice load failed";
+    memoryStatusEl.classList.add("bad");
+    memoryStatusEl.classList.remove("good");
+    console.error("Could not load speaker memory", error);
+  }
+}
+
+const speakerMemoryReady = initializeSpeakerMemoryProfiles();
 
 function updateSentStats(): void {
   sentStatsEl.textContent = `mic=${micSender?.getSentCount() ?? 0} sys=${sysSender?.getSentCount() ?? 0}`;
@@ -1282,7 +1338,7 @@ async function start(): Promise<void> {
   recvStatsEl.textContent = "0";
   speakerLegendEl.replaceChildren();
   speakerReviewListEl.replaceChildren();
-  updateSpeakerMemoryStatus(loadSpeakerMemoryProfiles());
+  updateSpeakerMemoryStatus(speakerMemoryProfiles);
   setLastUpdate(null);
 
   startedAt = Date.now();
@@ -1295,6 +1351,7 @@ async function start(): Promise<void> {
     setConnStatus("Connected", "good");
     startBtn.disabled = true;
     stopBtn.disabled = false;
+    await speakerMemoryReady;
     syncSpeakerMemoryProfiles();
 
     await replaceStreamCapture("mic", micSelect.value, false);
@@ -1501,7 +1558,7 @@ setConnStatus("Disconnected");
 updateMicMuteUi();
 updateMicGateStatus(null);
 updateLayerCounts();
-updateSpeakerMemoryStatus(loadSpeakerMemoryProfiles());
+updateSpeakerMemoryStatus(speakerMemoryProfiles);
 updateAiModelOptions();
 renderAiWorkspace();
 void refreshDevices();

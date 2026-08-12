@@ -8,6 +8,13 @@ type SaveTranscriptArgs = {
 
 type SaveTranscriptResult = { saved: boolean; path?: string; error?: string };
 type CopyTextResult = { copied: boolean; error?: string };
+type LoadSpeakerMemoryResult = {
+  loaded: boolean;
+  found: boolean;
+  profiles?: unknown;
+  error?: string;
+};
+type SaveSpeakerMemoryResult = { saved: boolean; error?: string };
 
 function preloadLog(msg: unknown): void {
   try {
@@ -24,6 +31,10 @@ try {
     saveTranscript: (args: SaveTranscriptArgs): Promise<SaveTranscriptResult> =>
       ipcRenderer.invoke("saveTranscript", args),
     copyText: (text: string): Promise<CopyTextResult> => ipcRenderer.invoke("copyText", { text }),
+    loadSpeakerMemoryProfiles: (): Promise<LoadSpeakerMemoryResult> =>
+      ipcRenderer.invoke("speakerMemory:load"),
+    saveSpeakerMemoryProfiles: (profiles: unknown): Promise<SaveSpeakerMemoryResult> =>
+      ipcRenderer.invoke("speakerMemory:save", profiles),
     getAiCliStatus: (): Promise<AiCliStatus> => ipcRenderer.invoke("ai:getStatus"),
     runAiTurn: (request: AiRunRequest): Promise<AiRunResult> => ipcRenderer.invoke("ai:run", request),
     cancelAiTurn: (requestId: string): Promise<boolean> => ipcRenderer.invoke("ai:cancel", requestId)
@@ -38,6 +49,8 @@ declare global {
     audioClient: {
       saveTranscript: (args: SaveTranscriptArgs) => Promise<SaveTranscriptResult>;
       copyText: (text: string) => Promise<CopyTextResult>;
+      loadSpeakerMemoryProfiles: () => Promise<LoadSpeakerMemoryResult>;
+      saveSpeakerMemoryProfiles: (profiles: unknown) => Promise<SaveSpeakerMemoryResult>;
       getAiCliStatus: () => Promise<AiCliStatus>;
       runAiTurn: (request: AiRunRequest) => Promise<AiRunResult>;
       cancelAiTurn: (requestId: string) => Promise<boolean>;

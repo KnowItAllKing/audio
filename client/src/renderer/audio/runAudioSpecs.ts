@@ -6,3 +6,4 @@ import "../CleanTranscript.spec";
 import "../AiThreadStore.spec";
 import "../../main/AiCliRunner.spec";
 import "../../main/AiCliRunner.integration.spec";
+import "../../main/SpeakerMemoryFile.spec";

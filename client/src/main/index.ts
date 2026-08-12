@@ -8,6 +8,11 @@ import {
   runAiCliTurn,
   validateAiRunRequest
 } from "./AiCliRunner";
+import {
+  readSpeakerMemoryFile,
+  SPEAKER_MEMORY_FILE_NAME,
+  writeSpeakerMemoryFile
+} from "./SpeakerMemoryFile";
 import type { AiCliStatus, AiRunRequest, AiRunResult } from "../shared/AiTypes";
 
 const MAX_ACTIVE_AI_REQUESTS = 3;
@@ -20,6 +25,10 @@ async function aiWorkspacePath(): Promise<string> {
   const path = join(app.getPath("userData"), "ai-workspace");
   await mkdir(path, { recursive: true });
   return path;
+}
+
+function speakerMemoryPath(): string {
+  return join(app.getPath("userData"), SPEAKER_MEMORY_FILE_NAME);
 }
 
 function aiFailure(requestId: string, error: string, cancelled = false): AiRunResult {
@@ -98,6 +107,37 @@ ipcMain.handle(
       return { saved: true, path: result.filePath };
     } catch (e) {
       return { saved: false, error: String(e) };
+    }
+  }
+);
+
+ipcMain.handle(
+  "speakerMemory:load",
+  async (): Promise<{ loaded: boolean; found: boolean; profiles?: unknown; error?: string }> => {
+    try {
+      const result = await readSpeakerMemoryFile(speakerMemoryPath());
+      return {
+        loaded: true,
+        found: result.found,
+        profiles: result.value
+      };
+    } catch (error) {
+      return { loaded: false, found: false, error: String(error) };
+    }
+  }
+);
+
+ipcMain.handle(
+  "speakerMemory:save",
+  async (
+    _event,
+    profiles: unknown
+  ): Promise<{ saved: boolean; error?: string }> => {
+    try {
+      await writeSpeakerMemoryFile(speakerMemoryPath(), { version: 1, profiles });
+      return { saved: true };
+    } catch (error) {
+      return { saved: false, error: String(error) };
     }
   }
 );

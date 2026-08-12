@@ -60,6 +60,12 @@
   - [ ] Cancel an in-flight request and confirm the CLI process exits and the tab remains usable
   - [ ] Close a tab and confirm it disappears without affecting other tabs
 
+- [ ] **Speaker memory persistence**
+  - [ ] Review a voice clip, enter a name, and click **Save**
+  - [ ] Quit and reopen Cadence
+  - [ ] Confirm the saved voice count returns
+  - [ ] Start another session and confirm the saved profile is sent to the server
+
 - [ ] **Stop + Save transcript**
   - [ ] Click **Stop**
   - [ ] Confirm status changes to **Finalizing…**, then **Finalized**

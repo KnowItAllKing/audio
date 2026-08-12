@@ -188,6 +188,12 @@ Name a clip once, and future matching can label similar speakers with that saved
 name. This is a local voice-profile layer on top of diarization; it does not
 make diarization itself know real names.
 
+Named voice fingerprints are persisted atomically in
+`speaker-memory-profiles.json` under Electron's `app.getPath("userData")`
+directory. Existing renderer-localStorage profiles migrate into this file on
+the first launch after upgrading. The client sends the profiles to the server
+at session start; the server only needs an in-memory working copy.
+
 Defaults:
 
 - review clips are temporary server-memory samples for playback and enrollment
@@ -290,6 +296,10 @@ Build a local unsigned macOS `.app` bundle:
 pnpm --filter audio-client dist:mac
 open "client/dist/mac-arm64/Cadence.app"
 ```
+
+The packaging configuration reuses the Electron runtime already installed in
+`client/node_modules`, so rebuilding the app does not require another runtime
+download.
 
 The packaged app is a client bundle only; start the Python websocket server
 separately before connecting.
