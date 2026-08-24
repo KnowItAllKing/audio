@@ -1,6 +1,6 @@
 WHISPER_E2E_MODEL ?= tiny
 
-.PHONY: server-test client-test client-typecheck setup-diarization real-whisper-e2e real-whisper-hard-e2e real-diarization real-pyannote-diarization speaker-memory-tts security-audit verify
+.PHONY: server-test client-test client-typecheck setup-diarization real-whisper-e2e real-whisper-hard-e2e real-diarization real-diarization-identity real-pyannote-diarization real-pyannote-diarization-identity speaker-memory-tts security-audit verify
 
 server-test:
 	PYTHONPATH=. uv run --project server --extra dev pytest -q
@@ -23,6 +23,14 @@ setup-diarization:
 
 real-diarization: setup-diarization
 	RUN_REAL_DIARIZATION=1 DIARIZATION_BACKEND=sherpa-onnx PYTHONPATH=. uv run --project server --extra dev --extra diarization pytest server/tests/test_real_diarization.py -q -rs
+
+real-diarization-identity: setup-diarization
+	RUN_REAL_DIARIZATION=1 DIARIZATION_BACKEND=sherpa-onnx PYTHONPATH=. uv run --project server --extra dev --extra diarization pytest server/tests/test_diarization_identity.py -q -rs -s
+
+# Same validation with the pyannote Community-1 backend producing the turns;
+# the identity embedder stays sherpa ERes2Net, so both extras are needed.
+real-pyannote-diarization-identity: setup-diarization
+	set -a; [ ! -f server/.env ] || . server/.env; set +a; RUN_REAL_DIARIZATION=1 DIARIZATION_BACKEND=pyannote PYTHONPATH=. uv run --project server --extra dev --extra diarization --extra diarization-pyannote pytest server/tests/test_diarization_identity.py -q -rs -s
 
 real-pyannote-diarization:
 	set -a; [ ! -f server/.env ] || . server/.env; set +a; RUN_REAL_DIARIZATION=1 DIARIZATION_BACKEND=pyannote PYTHONPATH=. uv run --project server --extra dev --extra diarization-pyannote pytest server/tests/test_real_diarization.py -q -rs

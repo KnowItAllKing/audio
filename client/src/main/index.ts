@@ -9,17 +9,32 @@ import {
   validateAiRunRequest
 } from "./AiCliRunner";
 import {
+  getArchiveCliStatus,
+  resolveArchiveExecutable,
+  runArchiveExtraction
+} from "./ArchiveJotExtractor";
+import {
   readSpeakerMemoryFile,
   SPEAKER_MEMORY_FILE_NAME,
   writeSpeakerMemoryFile
 } from "./SpeakerMemoryFile";
-import type { AiCliStatus, AiRunRequest, AiRunResult } from "../shared/AiTypes";
+import type { AiCliStatus, AiProvider, AiRunRequest, AiRunResult } from "../shared/AiTypes";
+import type {
+  ArchiveCliStatus,
+  ArchiveExtractRequest,
+  ArchiveExtractResult,
+  ArchiveJotConfig
+} from "../shared/ArchiveJot";
 
 const MAX_ACTIVE_AI_REQUESTS = 3;
 const activeAiRequests = new Map<
   string,
   { controller: AbortController; uiThreadId: string }
 >();
+
+const MAX_REMEMBERED_BATCHES = 8;
+const archiveJottedByBatch = new Map<string, Set<string>>();
+let activeArchiveExtraction: { requestId: string; controller: AbortController } | null = null;
 
 async function aiWorkspacePath(): Promise<string> {
   const path = join(app.getPath("userData"), "ai-workspace");
@@ -33,6 +48,44 @@ function speakerMemoryPath(): string {
 
 function aiFailure(requestId: string, error: string, cancelled = false): AiRunResult {
   return { ok: false, requestId, error, cancelled, durationMs: 0 };
+}
+
+function archiveFailure(requestId: string, error: string): ArchiveExtractResult {
+  return { ok: false, requestId, jotted: [], skipped: 0, error, durationMs: 0 };
+}
+
+function clampInt(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+function archiveJotConfigFromEnv(env: NodeJS.ProcessEnv = process.env): ArchiveJotConfig {
+  const enabledByDefault = ["1", "true", "on", "yes"].includes(
+    String(env.CADENCE_ARCHIVE_JOTS || "").toLowerCase()
+  );
+  const provider: AiProvider = env.CADENCE_ARCHIVE_EXTRACT_PROVIDER === "codex" ? "codex" : "claude";
+  const model = env.CADENCE_ARCHIVE_EXTRACT_MODEL ?? (provider === "claude" ? "haiku" : "");
+  return {
+    enabledByDefault,
+    provider,
+    model,
+    windowSec: clampInt(env.CADENCE_ARCHIVE_WINDOW_SEC, 150, 30, 900),
+    tickSec: clampInt(env.CADENCE_ARCHIVE_TICK_SEC, 60, 10, 600)
+  };
+}
+
+function jottedMemoryForBatch(batch: string): Set<string> {
+  let memory = archiveJottedByBatch.get(batch);
+  if (!memory) {
+    memory = new Set();
+    archiveJottedByBatch.set(batch, memory);
+    if (archiveJottedByBatch.size > MAX_REMEMBERED_BATCHES) {
+      const oldest = archiveJottedByBatch.keys().next();
+      if (!oldest.done) archiveJottedByBatch.delete(oldest.value);
+    }
+  }
+  return memory;
 }
 
 function createWindow(): BrowserWindow {
@@ -84,6 +137,8 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => {
   for (const request of activeAiRequests.values()) request.controller.abort();
   activeAiRequests.clear();
+  activeArchiveExtraction?.controller.abort();
+  activeArchiveExtraction = null;
 });
 
 ipcMain.handle(
@@ -209,3 +264,73 @@ ipcMain.handle("ai:cancel", (_event, requestId: unknown): boolean => {
   active.controller.abort();
   return true;
 });
+
+ipcMain.handle("archive:getConfig", (): ArchiveJotConfig => archiveJotConfigFromEnv());
+
+ipcMain.handle("archive:getStatus", async (): Promise<ArchiveCliStatus> => getArchiveCliStatus());
+
+ipcMain.handle(
+  "archive:extract",
+  async (_event, request: ArchiveExtractRequest): Promise<ArchiveExtractResult> => {
+    const requestId = typeof request?.requestId === "string" ? request.requestId : "invalid";
+    if (activeArchiveExtraction) {
+      return archiveFailure(requestId, "An archive extraction is already running.");
+    }
+    const provider: AiProvider = request?.provider === "codex" ? "codex" : "claude";
+    const [aiExecutable, archiveExecutable] = await Promise.all([
+      resolveAiExecutable(provider),
+      resolveArchiveExecutable()
+    ]);
+    if (!archiveExecutable) {
+      return archiveFailure(requestId, "The archive CLI was not found. Install it or set CADENCE_ARCHIVE_PATH.");
+    }
+    if (!aiExecutable) {
+      return archiveFailure(
+        requestId,
+        `${provider === "codex" ? "Codex" : "Claude"} CLI was not found. Install it or set the matching CADENCE_*_PATH environment variable.`
+      );
+    }
+
+    const controller = new AbortController();
+    activeArchiveExtraction = { requestId, controller };
+    try {
+      return await runArchiveExtraction(request, {
+        aiExecutable,
+        archiveExecutable,
+        cwd: await aiWorkspacePath(),
+        signal: controller.signal,
+        alreadyJotted: jottedMemoryForBatch(typeof request?.batch === "string" ? request.batch : "")
+      });
+    } finally {
+      activeArchiveExtraction = null;
+    }
+  }
+);
+
+ipcMain.handle("archive:cancel", (_event, requestId: unknown): boolean => {
+  if (typeof requestId !== "string") return false;
+  if (activeArchiveExtraction?.requestId !== requestId) return false;
+  activeArchiveExtraction.controller.abort();
+  return true;
+});
+
+ipcMain.handle(
+  "autoSaveTranscript",
+  async (
+    _event,
+    args: { fileName: string; jsonText: string }
+  ): Promise<{ saved: boolean; path?: string; error?: string }> => {
+    try {
+      if (typeof args?.jsonText !== "string") return { saved: false, error: "jsonText is required" };
+      const fileName =
+        String(args.fileName || "").replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 120) || "transcript.json";
+      const dir = join(app.getPath("userData"), "transcripts");
+      await mkdir(dir, { recursive: true });
+      const path = join(dir, fileName);
+      await writeFile(path, args.jsonText, "utf8");
+      return { saved: true, path };
+    } catch (e) {
+      return { saved: false, error: String(e) };
+    }
+  }
+);

@@ -149,6 +149,8 @@ fingerprints:
         "profile_id": "taylor-abc123",
         "name": "Taylor",
         "fingerprint": [0.12, -0.03, 0.44],
+        "fingerprints": [[0.12, -0.03, 0.44], [0.02, 0.31, 0.40]],
+        "kind": "named",
         "sample_count": 1,
         "created_at": 1730000000.0,
         "updated_at": 1730000000.0
@@ -157,6 +159,17 @@ fingerprints:
   }
 }
 ```
+
+Profile fields beyond the original single `fingerprint`:
+
+- `fingerprints` (optional): the profile's exemplar bank. One person can have
+  several distinct voice fingerprints (different microphones, rooms, days);
+  matching uses the closest exemplar. `fingerprint` remains the bank's
+  normalized mean for backward compatibility.
+- `kind` (optional): `"named"` (user-enrolled, default) or `"auto"` (learned
+  from a session's diarized voice without a user-given name). Auto profiles
+  let the next session recognize a returning voice and keep its label stable
+  even though nobody named it.
 
 ## Server → Client messages
 
@@ -297,7 +310,11 @@ the returned profiles locally and sync them back on the next connection.
 ### `speaker_memory_profiles`
 
 Sent after syncing client-owned fingerprints into the server's in-memory
-matcher.
+matcher, and again at session stop when the session changed the profile set:
+profiles matched during the session are reinforced with the session's voice
+exemplars, and unnamed diarized speakers with enough speech are exported as
+`kind: "auto"` profiles. The client persists whatever this message carries, so
+voices learned in one session are recognized in the next.
 
 ```json
 {

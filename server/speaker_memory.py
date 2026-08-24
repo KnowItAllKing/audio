@@ -14,11 +14,14 @@ from typing import Any, Optional
 
 import numpy as np
 
-from .diarization import DiarizationTurn
+from .diarization import DiarizationTurn, default_sherpa_model_paths
 from .protocol_types import StreamId
 
 
 logger = logging.getLogger("server.speaker_memory")
+
+MAX_PROFILE_EXEMPLARS = 8
+EXEMPLAR_MERGE_SIMILARITY = 0.90
 
 
 @dataclass(frozen=True)
@@ -29,12 +32,21 @@ class SpeakerProfile:
     sample_count: int
     created_at: float
     updated_at: float
+    # One voice can legitimately have several distinct fingerprints (different
+    # mics, rooms, days). Matching uses the best exemplar, not an average.
+    exemplars: tuple[np.ndarray, ...] = ()
+    kind: str = "named"
+
+    def bank(self) -> tuple[np.ndarray, ...]:
+        return self.exemplars if self.exemplars else (self.embedding,)
 
     def to_protocol(self) -> dict[str, Any]:
         return {
             "profile_id": self.profile_id,
             "name": self.name,
             "fingerprint": [float(value) for value in self.embedding],
+            "fingerprints": [[float(value) for value in exemplar] for exemplar in self.bank()],
+            "kind": self.kind,
             "sample_count": self.sample_count,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -81,6 +93,8 @@ class ReviewSample:
 
 
 class VoiceFingerprint:
+    kind = "spectral"
+
     def __init__(self, *, target_rate_hz: int = 16_000) -> None:
         self.target_rate_hz = target_rate_hz
 
@@ -129,12 +143,113 @@ class VoiceFingerprint:
         return embedding / norm
 
 
+class SherpaVoiceEmbedder:
+    """Real speaker-verification embeddings (3D-Speaker ERes2Net) using the
+    model already downloaded for sherpa-onnx diarization. Far more
+    discriminative than the spectral VoiceFingerprint fallback: on synthetic
+    multi-voice material, within-speaker cosine ~0.84 vs cross-speaker ~0.31,
+    where the spectral fingerprint's ranges overlap (0.99 vs 0.97)."""
+
+    kind = "sherpa-eres2net"
+
+    def __init__(self, *, model_path: str | None = None, target_rate_hz: int = 16_000) -> None:
+        import sherpa_onnx  # type: ignore
+
+        path = model_path or str(default_sherpa_model_paths()[1])
+        config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+            model=path,
+            num_threads=max(1, min(4, os.cpu_count() or 1)),
+            provider="cpu",
+        )
+        self._extractor = sherpa_onnx.SpeakerEmbeddingExtractor(config)
+        self.target_rate_hz = target_rate_hz
+
+    def embed(self, samples: np.ndarray, sample_rate_hz: int) -> np.ndarray:
+        audio = prepare_audio(samples=samples, sample_rate_hz=sample_rate_hz, target_rate_hz=self.target_rate_hz)
+        if audio.size < int(self.target_rate_hz * 0.4):
+            raise ValueError("speaker sample is too short")
+        stream = self._extractor.create_stream()
+        stream.accept_waveform(self.target_rate_hz, audio)
+        stream.input_finished()
+        embedding = np.array(self._extractor.compute(stream), dtype=np.float32)
+        norm = float(np.linalg.norm(embedding))
+        if norm <= 1e-8:
+            raise ValueError("speaker sample has no voice fingerprint")
+        return embedding / norm
+
+
+def create_voice_embedder() -> VoiceFingerprint | SherpaVoiceEmbedder:
+    """Best available embedder: sherpa ERes2Net when the diarization models are
+    installed, else the dependency-free spectral fingerprint."""
+    try:
+        from .diarization import sherpa_models_present
+
+        if sherpa_models_present():
+            return SherpaVoiceEmbedder()
+    except Exception:
+        logger.info("sherpa voice embedder unavailable; using spectral fingerprint", exc_info=True)
+    return VoiceFingerprint()
+
+
+def default_match_threshold(embedder: Any) -> float:
+    return 0.60 if getattr(embedder, "kind", "spectral") == "sherpa-eres2net" else 0.82
+
+
+def bank_similarity(bank: tuple[np.ndarray, ...] | list[np.ndarray], embedding: np.ndarray) -> float:
+    best = 0.0
+    for exemplar in bank:
+        if exemplar.shape != embedding.shape:
+            continue
+        best = max(best, cosine_similarity(embedding, exemplar))
+    return best
+
+
+def merge_into_bank(
+    bank: list[np.ndarray],
+    embedding: np.ndarray,
+    *,
+    merge_similarity: float = EXEMPLAR_MERGE_SIMILARITY,
+    max_exemplars: int = MAX_PROFILE_EXEMPLARS,
+) -> list[np.ndarray]:
+    """Fold one embedding into an exemplar bank: average into the nearest
+    exemplar when it is close enough, otherwise keep it as a new exemplar of
+    the same voice. When the bank overflows, the two closest exemplars merge."""
+    bank = [exemplar for exemplar in bank if exemplar.shape == embedding.shape]
+    if not bank:
+        return [embedding]
+
+    similarities = [cosine_similarity(embedding, exemplar) for exemplar in bank]
+    nearest = int(np.argmax(similarities))
+    if similarities[nearest] >= merge_similarity:
+        merged = _unit(bank[nearest] + embedding)
+        bank[nearest] = merged
+        return bank
+
+    bank.append(embedding)
+    while len(bank) > max_exemplars:
+        best_pair, best_sim = (0, 1), -1.0
+        for i in range(len(bank)):
+            for j in range(i + 1, len(bank)):
+                sim = cosine_similarity(bank[i], bank[j])
+                if sim > best_sim:
+                    best_pair, best_sim = (i, j), sim
+        i, j = best_pair
+        bank[i] = _unit(bank[i] + bank[j])
+        del bank[j]
+    return bank
+
+
+def _unit(vector: np.ndarray) -> np.ndarray:
+    norm = float(np.linalg.norm(vector))
+    return (vector / norm).astype(np.float32) if norm > 1e-8 else vector.astype(np.float32)
+
+
 class SpeakerMemory:
     def __init__(
         self,
         *,
         threshold: float = 0.82,
-        fingerprinter: Optional[VoiceFingerprint] = None,
+        fingerprinter: Optional[Any] = None,
     ) -> None:
         self.threshold = threshold
         self.fingerprinter = fingerprinter or VoiceFingerprint()
@@ -167,19 +282,7 @@ class SpeakerMemory:
         now = time.time()
         existing = self._profile_by_name(clean_name)
         if existing is not None:
-            count = max(1, existing.sample_count)
-            merged = ((existing.embedding * count) + embedding) / float(count + 1)
-            merged_norm = float(np.linalg.norm(merged))
-            if merged_norm > 1e-8:
-                merged = merged / merged_norm
-            profile = SpeakerProfile(
-                profile_id=existing.profile_id,
-                name=existing.name,
-                embedding=merged.astype(np.float32),
-                sample_count=count + 1,
-                created_at=existing.created_at,
-                updated_at=now,
-            )
+            profile = self._with_exemplars(existing, [embedding], now=now)
         else:
             profile = SpeakerProfile(
                 profile_id=profile_id_for_name(clean_name),
@@ -188,10 +291,28 @@ class SpeakerMemory:
                 sample_count=1,
                 created_at=now,
                 updated_at=now,
+                exemplars=(embedding.astype(np.float32),),
+                kind="named",
             )
 
         self._profiles[profile.profile_id] = profile
         return profile
+
+    def reinforce(self, profile_id: str, exemplars: list[np.ndarray]) -> Optional[SpeakerProfile]:
+        """Fold a session's voice exemplars into a profile's bank so future
+        sessions recognize that rendition of the voice too."""
+        existing = self._profiles.get(profile_id)
+        if existing is None or not exemplars:
+            return None
+        profile = self._with_exemplars(existing, exemplars, now=time.time())
+        self._profiles[profile.profile_id] = profile
+        return profile
+
+    def add_profile(self, profile: SpeakerProfile) -> None:
+        self._profiles[profile.profile_id] = profile
+
+    def get(self, profile_id: str) -> Optional[SpeakerProfile]:
+        return self._profiles.get(profile_id)
 
     def match(self, *, samples: np.ndarray, sample_rate_hz: int) -> Optional[SpeakerMatch]:
         if not self._profiles:
@@ -200,17 +321,34 @@ class SpeakerMemory:
             embedding = self.fingerprinter.embed(samples, sample_rate_hz)
         except ValueError:
             return None
+        return self.match_embedding(embedding)
 
+    def match_embedding(self, embedding: np.ndarray) -> Optional[SpeakerMatch]:
         best: SpeakerMatch | None = None
         for profile in self._profiles.values():
-            if profile.embedding.shape != embedding.shape:
-                continue
-            confidence = cosine_similarity(embedding, profile.embedding)
+            confidence = bank_similarity(profile.bank(), embedding)
             if best is None or confidence > best.confidence:
                 best = SpeakerMatch(profile=profile, confidence=confidence)
         if best is None or best.confidence < self.threshold:
             return None
         return best
+
+    @staticmethod
+    def _with_exemplars(existing: SpeakerProfile, exemplars: list[np.ndarray], *, now: float) -> SpeakerProfile:
+        bank = list(existing.bank())
+        for exemplar in exemplars:
+            bank = merge_into_bank(bank, exemplar.astype(np.float32))
+        mean = _unit(np.sum(bank, axis=0)) if bank else existing.embedding
+        return SpeakerProfile(
+            profile_id=existing.profile_id,
+            name=existing.name,
+            embedding=mean,
+            sample_count=max(1, existing.sample_count) + len(exemplars),
+            created_at=existing.created_at,
+            updated_at=now,
+            exemplars=tuple(bank),
+            kind=existing.kind,
+        )
 
     def _profile_by_name(self, name: str) -> Optional[SpeakerProfile]:
         folded = name.casefold()
@@ -290,8 +428,9 @@ class SpeakerReviewStore:
 def create_speaker_memory() -> Optional[SpeakerMemory]:
     if env_bool("SPEAKER_MEMORY_ENABLED", True) is False:
         return None
-    threshold = env_float("SPEAKER_MEMORY_THRESHOLD", 0.82)
-    return SpeakerMemory(threshold=threshold)
+    embedder = create_voice_embedder()
+    threshold = env_float("SPEAKER_MEMORY_THRESHOLD", default_match_threshold(embedder))
+    return SpeakerMemory(threshold=threshold, fingerprinter=embedder)
 
 
 def speaker_profile_from_protocol(item: Any) -> Optional[SpeakerProfile]:
@@ -308,25 +447,46 @@ def speaker_profile_from_protocol(item: Any) -> Optional[SpeakerProfile]:
     if not isinstance(fingerprint, list) or not fingerprint:
         return None
 
+    primary = _parse_fingerprint(fingerprint)
+    if primary is None:
+        return None
+
+    bank: list[np.ndarray] = []
+    raw_bank = item.get("fingerprints")
+    if isinstance(raw_bank, list):
+        for raw in raw_bank[:MAX_PROFILE_EXEMPLARS]:
+            parsed = _parse_fingerprint(raw)
+            if parsed is not None and parsed.shape == primary.shape:
+                bank.append(parsed)
+    if not bank:
+        bank = [primary]
+
+    kind = item.get("kind")
+    return SpeakerProfile(
+        profile_id=profile_id.strip(),
+        name=" ".join(name.strip().split()),
+        embedding=_unit(np.sum(bank, axis=0)),
+        sample_count=max(1, coerce_int(item.get("sample_count"), default=1)),
+        created_at=coerce_float(item.get("created_at"), default=0.0),
+        updated_at=coerce_float(item.get("updated_at"), default=0.0),
+        exemplars=tuple(bank),
+        kind=kind if kind in ("named", "auto") else "named",
+    )
+
+
+def _parse_fingerprint(value: Any) -> Optional[np.ndarray]:
+    if not isinstance(value, list) or not value:
+        return None
     try:
-        vector = np.array(fingerprint, dtype=np.float32)
+        vector = np.array(value, dtype=np.float32)
     except (TypeError, ValueError):
         return None
     if vector.ndim != 1 or vector.size == 0 or not np.all(np.isfinite(vector)):
         return None
-
     norm = float(np.linalg.norm(vector))
     if norm <= 1e-8:
         return None
-
-    return SpeakerProfile(
-        profile_id=profile_id.strip(),
-        name=" ".join(name.strip().split()),
-        embedding=(vector / norm).astype(np.float32),
-        sample_count=max(1, coerce_int(item.get("sample_count"), default=1)),
-        created_at=coerce_float(item.get("created_at"), default=0.0),
-        updated_at=coerce_float(item.get("updated_at"), default=0.0),
-    )
+    return (vector / norm).astype(np.float32)
 
 
 def prepare_audio(*, samples: np.ndarray, sample_rate_hz: int, target_rate_hz: int) -> np.ndarray:

@@ -19,7 +19,6 @@
     "productName": "Cadence",
     "asar": true,
     "npmRebuild": false,
-    "electronDist": "node_modules/electron/dist",
     "directories": {
       "output": "dist"
     },
@@ -28,6 +27,7 @@
       "package.json"
     ],
     "mac": {
+      "icon": "assets/icon.png",
       "target": [
         "dir"
       ],

@@ -123,6 +123,35 @@ Without Zoom metadata or diarization, mic defaults to `You` and system audio
 defaults to `System audio`. The Electron client relies on server-provided
 speaker identities and does not override diarization labels.
 
+### Archive jots (live capture)
+
+With the **Jot to archive** toggle on (off by default — it spends LLM tokens
+every minute), the Electron client periodically runs a sliding window of the
+Processed transcript through an AI CLI and pushes moments worth keeping
+(decisions, action items, claims to verify, names/dates/numbers) into the
+[`archive`](https://github.com/KnowItAllKing/archive) CLI as jots. One
+meeting's jots share a batch named `cadence-YYYY-MM-DD-<slug of the session
+title>`, so `archive list --batch NAME` shows them grouped and an archivist
+session can distill the meeting as a unit. Each jot carries
+`--source cadence:<session_id>`.
+
+The extraction prompt reuses the AI Q&A fencing: the transcript window is
+untrusted source material, and instructions spoken into a meeting are never
+followed. Overlapping windows are deduplicated twice — the prompt lists what
+was already jotted, and the main process keeps a per-batch memory of pushed
+texts. Stopping a session runs one final extraction over the tail window after
+the server flushes, then nothing further is pushed. Stopping also auto-saves
+the transcript JSON to `userData/transcripts/` before the save dialog, so the
+jots are never the only durable record of a meeting.
+
+Configuration (environment variables): `CADENCE_ARCHIVE_JOTS=1` turns the
+toggle on by default, `CADENCE_ARCHIVE_EXTRACT_PROVIDER` (`claude`, default,
+or `codex`) and `CADENCE_ARCHIVE_EXTRACT_MODEL` (default `haiku`) pick the
+extraction model — a cheap/fast model is the right choice —
+`CADENCE_ARCHIVE_WINDOW_SEC` (default 150) and `CADENCE_ARCHIVE_TICK_SEC`
+(default 60) shape the loop, and `CADENCE_ARCHIVE_PATH` points at the
+`archive` binary when it is not on `PATH`.
+
 ### Speaker diarization
 
 Diarization labels mixed system audio as `Speaker 1`, `Speaker 2`, etc. The
@@ -167,11 +196,51 @@ Useful knobs:
 pyannote models may require accepting gated Hugging Face model terms for
 `pyannote/speaker-diarization-community-1`.
 
+### Speaker identity across windows and sessions
+
+Windowed diarization alone only keeps ids stable through time overlap between
+consecutive windows — a speaker who is silent for a while used to come back as
+a brand-new "Speaker N". With the sherpa models installed, the server now
+voice-embeds every diarized turn (3D-Speaker ERes2Net, the same model
+diarization already uses) and matches it against the session's known voices,
+so a returning voice reuses its id and label no matter how long it was silent.
+Turn-level matching also splits window clusters that glued two similar voices
+together.
+
+Identity extends across sessions through speaker memory: at session stop,
+profiles that matched during the session are reinforced with that session's
+voice exemplars (one person's profile holds up to 8 distinct fingerprints —
+different mics, rooms, days — and matching uses the closest one), and unnamed
+diarized speakers with enough speech are exported as `auto` profiles. The
+client persists them, sends them back at the next session start, and the
+returning voice is recognized under its previous label. Naming an auto voice
+via **Review voices** merges its bank into the named profile.
+
+Knobs:
+
+- `DIARIZATION_IDENTITY_ENABLED=0` to disable identity resolution
+- `DIARIZATION_IDENTITY_THRESHOLD=0.68` (min cosine to reuse a known voice)
+- `DIARIZATION_IDENTITY_MARGIN=0.05` (required lead over the runner-up voice)
+- `SPEAKER_MEMORY_AUTO_PROFILES=0` to stop persisting unnamed session voices
+- `SPEAKER_MEMORY_MIN_AUTO_PROFILE_SEC=10` (min speech before an auto profile)
+- When identity is enabled, `DIARIZATION_CLUSTER_THRESHOLD` defaults to `0.35`
+  so within-window clustering over-splits; the identity layer re-merges
+  clusters of the same voice.
+
 Real diarization smoke test:
 
 ```bash
 make real-diarization
 make real-pyannote-diarization  # uses a token already present in the environment or server/.env
+```
+
+Speaker-identity validation (3–4 distinct TTS voices, many sliding windows,
+asserts one stable id per speaker within a session and recognition across
+sessions):
+
+```bash
+make real-diarization-identity
+make real-pyannote-diarization-identity  # same validation, pyannote backend
 ```
 
 Whisper word timestamps are enabled by default (`WHISPER_WORD_TIMESTAMPS=1`).

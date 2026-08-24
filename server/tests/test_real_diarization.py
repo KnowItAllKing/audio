@@ -17,10 +17,16 @@ SECOND_PHRASE = "Second speaker talks about vendor refunds."
 THIRD_PHRASE = "First speaker returns to discuss database access."
 
 
+# Captured at import time: the autouse conftest fixture overwrites
+# DIARIZATION_BACKEND=off for test isolation before the test body runs, which
+# used to make the pyannote variant of this test silently run sherpa instead.
+BACKEND_NAME = os.environ.get("DIARIZATION_BACKEND", "sherpa-onnx").lower()
+
+
 def test_real_diarization_two_speakers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     if os.environ.get("RUN_REAL_DIARIZATION") != "1":
         pytest.skip("set RUN_REAL_DIARIZATION=1 to run real diarization")
-    backend_name = os.environ.get("DIARIZATION_BACKEND", "sherpa-onnx").lower()
+    backend_name = BACKEND_NAME
     if backend_name in ("pyannote", "community") and not _hf_token_present():
         pytest.skip("DIARIZATION_HF_TOKEN, HF_TOKEN, or HUGGINGFACE_TOKEN is required")
     if not shutil.which("say") or not shutil.which("afconvert"):

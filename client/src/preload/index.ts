@@ -1,8 +1,19 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { AiCliStatus, AiRunRequest, AiRunResult } from "../shared/AiTypes";
+import type {
+  ArchiveCliStatus,
+  ArchiveExtractRequest,
+  ArchiveExtractResult,
+  ArchiveJotConfig
+} from "../shared/ArchiveJot";
 
 type SaveTranscriptArgs = {
   suggestedName: string;
+  jsonText: string;
+};
+
+type AutoSaveTranscriptArgs = {
+  fileName: string;
   jsonText: string;
 };
 
@@ -37,7 +48,15 @@ try {
       ipcRenderer.invoke("speakerMemory:save", profiles),
     getAiCliStatus: (): Promise<AiCliStatus> => ipcRenderer.invoke("ai:getStatus"),
     runAiTurn: (request: AiRunRequest): Promise<AiRunResult> => ipcRenderer.invoke("ai:run", request),
-    cancelAiTurn: (requestId: string): Promise<boolean> => ipcRenderer.invoke("ai:cancel", requestId)
+    cancelAiTurn: (requestId: string): Promise<boolean> => ipcRenderer.invoke("ai:cancel", requestId),
+    getArchiveJotConfig: (): Promise<ArchiveJotConfig> => ipcRenderer.invoke("archive:getConfig"),
+    getArchiveCliStatus: (): Promise<ArchiveCliStatus> => ipcRenderer.invoke("archive:getStatus"),
+    runArchiveExtraction: (request: ArchiveExtractRequest): Promise<ArchiveExtractResult> =>
+      ipcRenderer.invoke("archive:extract", request),
+    cancelArchiveExtraction: (requestId: string): Promise<boolean> =>
+      ipcRenderer.invoke("archive:cancel", requestId),
+    autoSaveTranscript: (args: AutoSaveTranscriptArgs): Promise<SaveTranscriptResult> =>
+      ipcRenderer.invoke("autoSaveTranscript", args)
   });
   preloadLog("exposed window.audioClient");
 } catch (e) {
@@ -54,6 +73,11 @@ declare global {
       getAiCliStatus: () => Promise<AiCliStatus>;
       runAiTurn: (request: AiRunRequest) => Promise<AiRunResult>;
       cancelAiTurn: (requestId: string) => Promise<boolean>;
+      getArchiveJotConfig: () => Promise<ArchiveJotConfig>;
+      getArchiveCliStatus: () => Promise<ArchiveCliStatus>;
+      runArchiveExtraction: (request: ArchiveExtractRequest) => Promise<ArchiveExtractResult>;
+      cancelArchiveExtraction: (requestId: string) => Promise<boolean>;
+      autoSaveTranscript: (args: AutoSaveTranscriptArgs) => Promise<SaveTranscriptResult>;
     };
   }
 }

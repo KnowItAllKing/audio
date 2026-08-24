@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Optional, cast
 
 from .protocol_types import SpeakerSource, StreamId
@@ -168,16 +168,25 @@ class SpeakerTracker:
         end_sec: float,
         sources: set[SpeakerSource],
     ) -> None:
-        """Remove replaceable inferred turns while preserving manual/Zoom metadata."""
+        """Remove replaceable inferred turns while preserving manual/Zoom metadata.
+
+        Activities that straddle a boundary of the range are trimmed, not
+        dropped: the replacing window only re-covers its own span, so deleting
+        a turn that pokes past the boundary would lose the outside part for
+        good (the next windows start after it and never restore it)."""
         if end_sec < start_sec:
             start_sec, end_sec = end_sec, start_sec
         kept: list[SpeakerActivity] = []
         for activity in self.activities:
             activity_end = activity.end_sec if activity.end_sec is not None else float("inf")
             overlaps = activity.start_sec < end_sec and activity_end > start_sec
-            if activity.stream_id == stream_id and activity.speaker_source in sources and overlaps:
+            if activity.stream_id != stream_id or activity.speaker_source not in sources or not overlaps:
+                kept.append(activity)
                 continue
-            kept.append(activity)
+            if activity.start_sec < start_sec:
+                kept.append(replace(activity, end_sec=start_sec))
+            if activity_end > end_sec and activity.end_sec is not None:
+                kept.append(replace(activity, start_sec=end_sec))
         self.activities = kept
 
     def resolve(self, *, stream_id: StreamId, start_sec: float, end_sec: float) -> SpeakerIdentity:
@@ -195,8 +204,10 @@ class SpeakerTracker:
         return self.stream_speakers[stream_id]
 
     def _activity_for(self, *, stream_id: StreamId, start_sec: float, end_sec: float) -> Optional[SpeakerActivity]:
-        if stream_id != "system":
-            return None
+        # Streams without diarization/Zoom/manual activity simply have no
+        # activities recorded and fall back to the stream default (mic → You).
+        # Gating on the stream name here would silently break
+        # DIARIZATION_STREAMS=mic (a laptop mic hearing a whole room).
         mid_sec = start_sec + max(0.0, end_sec - start_sec) / 2.0
         exact_matches: list[SpeakerActivity] = []
         boundary_matches: list[SpeakerActivity] = []

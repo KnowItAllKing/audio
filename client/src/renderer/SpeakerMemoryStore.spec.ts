@@ -59,3 +59,55 @@ assert.deepEqual(
   normalizeSpeakerMemoryProfiles({ profiles: [{ profile_id: "bob", name: "Bob", fingerprint: [1] }] })[0].name,
   "Bob"
 );
+
+// Exemplar banks and auto-learned profiles survive normalization.
+const banked = normalizeSpeakerMemoryProfiles([
+  {
+    profile_id: "john",
+    name: "John",
+    fingerprint: [1, 0],
+    fingerprints: [
+      [1, 0],
+      [0.7, 0.7],
+      ["bad"],
+      []
+    ],
+    kind: "named",
+    sample_count: 3
+  },
+  {
+    profile_id: "auto-1",
+    name: "Speaker 1",
+    fingerprint: [0, 1],
+    kind: "auto",
+    updated_at: 5
+  }
+]);
+assert.equal(banked.length, 2);
+const john = banked.find((profile) => profile.profile_id === "john");
+assert.ok(john);
+assert.deepEqual(john.fingerprints, [
+  [1, 0],
+  [0.7, 0.7]
+]);
+assert.equal(john.kind, "named");
+const autoProfile = banked.find((profile) => profile.profile_id === "auto-1");
+assert.ok(autoProfile);
+assert.equal(autoProfile.kind, "auto");
+assert.equal(autoProfile.fingerprints, undefined);
+
+// Auto profiles are capped to the most recently heard voices; named survive.
+const flood = normalizeSpeakerMemoryProfiles([
+  { profile_id: "named-1", name: "Zoe", fingerprint: [1], kind: "named", updated_at: 0 },
+  ...Array.from({ length: 40 }, (_, index) => ({
+    profile_id: `auto-${index}`,
+    name: `Speaker ${index}`,
+    fingerprint: [1],
+    kind: "auto",
+    updated_at: index
+  }))
+]);
+assert.equal(flood.filter((profile) => profile.kind === "auto").length, 32);
+assert.ok(flood.some((profile) => profile.profile_id === "named-1"));
+assert.ok(flood.some((profile) => profile.profile_id === "auto-39"));
+assert.ok(!flood.some((profile) => profile.profile_id === "auto-0"));

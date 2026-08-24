@@ -33,8 +33,11 @@ from .protocol_types import (
     TranscriptUpdateMessage,
 )
 from .session_state import SessionState, StreamBuffer
+from .speaker_identity import SessionSpeakerRegistry, turn_embeddings
 from .speaker_memory import (
+    SpeakerMatch,
     SpeakerMemory,
+    create_voice_embedder,
     SpeakerReviewStore,
     clip_by_time,
     create_speaker_memory,
@@ -291,8 +294,25 @@ class ServerState:
         self.sessions: dict[str, SessionState] = {}
         self.session_sockets: dict[str, set[ServerConnection]] = {}
         self.backend: WhisperBackend = create_backend()
-        self.diarizer: DiarizationBackend | None = create_diarization_backend()
         self.speaker_memory: SpeakerMemory | None = create_speaker_memory()
+        # Voice identity across windows needs a discriminative embedder; the
+        # spectral fallback would merge distinct voices, so identity resolution
+        # only activates alongside the sherpa embedding model.
+        self.voice_embedder = (
+            self.speaker_memory.fingerprinter if self.speaker_memory is not None else create_voice_embedder()
+        )
+        self.identity_enabled = (
+            _env_bool("DIARIZATION_IDENTITY_ENABLED", True)
+            and getattr(self.voice_embedder, "kind", "spectral") == "sherpa-eres2net"
+        )
+        if self.identity_enabled:
+            # With an identity layer on top, within-window clustering should
+            # over-split rather than merge similar voices — the registry
+            # re-merges clusters of the same voice, but it cannot split a
+            # cluster that glued two speakers together (per-turn embeddings
+            # recover most of it, still the cleaner input helps).
+            os.environ.setdefault("DIARIZATION_CLUSTER_THRESHOLD", "0.35")
+        self.diarizer: DiarizationBackend | None = create_diarization_backend()
         self.speaker_review = SpeakerReviewStore(
             min_duration_sec=_env_float("SPEAKER_MEMORY_MIN_CLIP_SEC", 0.5),
             max_duration_sec=_env_float("SPEAKER_MEMORY_MAX_CLIP_SEC", 6.0),
@@ -304,6 +324,7 @@ class ServerState:
         )
         self.utterance_assemblers: dict[tuple[str, StreamId], UtteranceAssembler] = {}
         self.diarization_mappers: dict[tuple[str, StreamId], DiarizationSpeakerMapper] = {}
+        self.identity_registries: dict[tuple[str, StreamId], SessionSpeakerRegistry] = {}
         self.transcription_locks: dict[tuple[str, StreamId], asyncio.Lock] = {}
         self.pending_transcripts: dict[
             tuple[str, StreamId],
@@ -340,6 +361,21 @@ class ServerState:
             )
             self.diarization_mappers[key] = mapper
         return mapper
+
+    def get_identity_registry(self, session_id: str, stream_id: StreamId) -> SessionSpeakerRegistry:
+        key = (session_id, stream_id)
+        registry = self.identity_registries.get(key)
+        if registry is None:
+            registry = SessionSpeakerRegistry(
+                match_threshold=_env_float("DIARIZATION_IDENTITY_THRESHOLD", 0.68),
+                match_margin=_env_float("DIARIZATION_IDENTITY_MARGIN", 0.05),
+            )
+            self.identity_registries[key] = registry
+        # Profiles can arrive at any point before or during the session;
+        # seeding is idempotent per profile id.
+        if self.speaker_memory is not None:
+            registry.seed_profiles(self.speaker_memory.profiles())
+        return registry
 
     def get_transcription_lock(self, session_id: str, stream_id: StreamId) -> asyncio.Lock:
         key = (session_id, stream_id)
@@ -504,6 +540,7 @@ def _apply_diarization_turns(
     sample_rate_hz: int,
     replace_start_sec: float | None = None,
     replace_end_sec: float | None = None,
+    identity_registry: SessionSpeakerRegistry | None = None,
 ) -> None:
     epoch_sec = (buf.first_timestamp_ms / 1000.0) if buf.first_timestamp_ms else 0.0
     tracker = state.get_speaker_tracker(session.session_id)
@@ -525,7 +562,17 @@ def _apply_diarization_turns(
         speaker_confidence = turn.speaker_confidence
         match = None
 
-        if state.speaker_memory is not None:
+        if identity_registry is not None:
+            # Window-level identity resolution already decided who this is
+            # (including profile matches); per-turn re-matching on short clips
+            # would only second-guess it with worse evidence.
+            info = identity_registry.match_info(turn.speaker_id)
+            if info is not None and state.speaker_memory is not None:
+                profile = state.speaker_memory.get(info[0])
+                if profile is not None:
+                    match = SpeakerMatch(profile=profile, confidence=info[2])
+                    speaker_source = "memory"
+        elif state.speaker_memory is not None:
             clip = clip_by_time(
                 samples,
                 sample_rate_hz,
@@ -901,6 +948,7 @@ async def _process_pending_transcripts(
     has_transcript = any(item.segments for item in group)
     diarization_turns: list[DiarizationTurn] = []
     diarization_completed = False
+    diarization_embeddings: list[np.ndarray | None] = []
     diarization_samples = np.zeros(0, dtype=np.float32)
     diarization_base_offset_sec = float(group_start) / float(bps)
     diarization_duration_sec = 0.0
@@ -931,6 +979,14 @@ async def _process_pending_transcripts(
                 sess.sample_rate_hz,
             )
             diarization_completed = True
+            if state.identity_enabled and diarization_turns:
+                diarization_embeddings = await asyncio.to_thread(
+                    turn_embeddings,
+                    diarization_turns,
+                    diarization_samples,
+                    sess.sample_rate_hz,
+                    state.voice_embedder,
+                )
         except Exception:
             logger.exception(
                 "diarization failed for session=%s stream=%s",
@@ -946,6 +1002,14 @@ async def _process_pending_transcripts(
                 base_offset_sec=diarization_base_offset_sec,
                 window_duration_sec=diarization_duration_sec,
             )
+            identity_registry: SessionSpeakerRegistry | None = None
+            if state.identity_enabled:
+                identity_registry = state.get_identity_registry(sess.session_id, stream_id)
+                # map_turns preserves order, so the per-turn embeddings
+                # computed on the backend's local turns align 1:1.
+                diarization_turns = identity_registry.resolve_window(
+                    diarization_turns, diarization_embeddings
+                )
             _apply_diarization_turns(
                 state,
                 sess,
@@ -957,6 +1021,7 @@ async def _process_pending_transcripts(
                 sess.sample_rate_hz,
                 replace_start_sec=diarization_base_offset_sec,
                 replace_end_sec=diarization_base_offset_sec + diarization_duration_sec,
+                identity_registry=identity_registry,
             )
         for item in group:
             if item.segments:
@@ -1118,6 +1183,22 @@ async def _handle_control_message(
             ]
             sockets = set(state.session_sockets.get(session_id, set()))
         await _send_transcript_segments(state, session_id, segments, sockets)
+        profiles_changed = False
+        if state.speaker_memory is not None:
+            async with state.lock:
+                for (registry_session_id, _), registry in state.identity_registries.items():
+                    if registry_session_id != session_id:
+                        continue
+                    profiles_changed |= registry.export_updates(
+                        state.speaker_memory,
+                        session_id=session_id,
+                        min_auto_profile_sec=_env_float("SPEAKER_MEMORY_MIN_AUTO_PROFILE_SEC", 10.0),
+                        auto_profiles_enabled=_env_bool("SPEAKER_MEMORY_AUTO_PROFILES", True),
+                    )
+        if profiles_changed:
+            # The client persists this update, so reinforced and newly learned
+            # voices survive into the next session.
+            await _send_speaker_memory_profiles(ws, state, session_id)
         await _send_speaker_memory_review(ws, state, session_id)
         await ws.send(
             json.dumps(

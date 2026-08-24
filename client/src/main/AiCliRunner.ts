@@ -26,6 +26,7 @@ type RunTurnOptions = {
   cwd: string;
   signal?: AbortSignal;
   timeoutMs?: number;
+  env?: NodeJS.ProcessEnv;
 };
 
 export class AiCliRunError extends Error {
@@ -198,12 +199,11 @@ async function isExecutable(path: string): Promise<boolean> {
   }
 }
 
-export async function resolveAiExecutable(
-  provider: AiProvider,
+export async function resolveExecutable(
+  binary: string,
+  override: string | undefined,
   env: NodeJS.ProcessEnv = process.env
 ): Promise<string | undefined> {
-  const override = provider === "codex" ? env.CADENCE_CODEX_PATH : env.CADENCE_CLAUDE_PATH;
-  const binary = provider;
   const candidates = [
     override,
     ...(env.PATH || "").split(delimiter).filter(Boolean).map((entry) => join(entry, binary)),
@@ -218,21 +218,29 @@ export async function resolveAiExecutable(
   return undefined;
 }
 
+export async function resolveAiExecutable(
+  provider: AiProvider,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<string | undefined> {
+  const override = provider === "codex" ? env.CADENCE_CODEX_PATH : env.CADENCE_CLAUDE_PATH;
+  return resolveExecutable(provider, override, env);
+}
+
 function timeoutFromEnvironment(): number {
   const parsed = Number(process.env.CADENCE_AI_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
   return Number.isFinite(parsed) ? Math.max(5_000, Math.min(900_000, parsed)) : DEFAULT_TIMEOUT_MS;
 }
 
-async function runProcess(
+export async function runProcess(
   executable: string,
   args: string[],
   prompt: string,
-  options: { cwd: string; signal?: AbortSignal; timeoutMs: number }
+  options: { cwd: string; signal?: AbortSignal; timeoutMs: number; env?: NodeJS.ProcessEnv }
 ): Promise<ProcessOutput> {
   return await new Promise<ProcessOutput>((resolve, reject) => {
     const child = spawn(executable, args, {
       cwd: options.cwd,
-      env: { ...process.env, NO_COLOR: "1", TERM: "dumb" },
+      env: { ...process.env, NO_COLOR: "1", TERM: "dumb", ...options.env },
       stdio: ["pipe", "pipe", "pipe"]
     });
     let stdout = "";
@@ -323,7 +331,8 @@ export async function runAiCliTurn(request: AiRunRequest, options: RunTurnOption
     const output = await runProcess(options.executable, args, prompt, {
       cwd: options.cwd,
       signal: options.signal,
-      timeoutMs: options.timeoutMs ?? timeoutFromEnvironment()
+      timeoutMs: options.timeoutMs ?? timeoutFromEnvironment(),
+      env: options.env
     });
     const parsed =
       request.provider === "codex" ? parseCodexOutput(output.stdout) : parseClaudeOutput(output.stdout);

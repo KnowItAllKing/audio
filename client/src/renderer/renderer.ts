@@ -20,7 +20,9 @@ import {
   type AiMessage,
   type AiThread
 } from "./AiThreadStore";
+import { ArchiveJotSession, selectJotWindowSegments } from "./ArchiveJotSession";
 import type { AiCliStatus, AiProvider, AiRunRequest } from "../shared/AiTypes";
+import { batchNameForSession, type ArchiveJotConfig } from "../shared/ArchiveJot";
 
 type TranscriptSegment = {
   id: string;
@@ -161,6 +163,9 @@ const aiMessagesEl = $<HTMLDivElement>("aiMessages");
 const aiQuestionEl = $<HTMLTextAreaElement>("aiQuestion");
 const aiCancelBtn = $<HTMLButtonElement>("aiCancelBtn");
 const aiSendBtn = $<HTMLButtonElement>("aiSendBtn");
+const sessionTitleInput = $<HTMLInputElement>("sessionTitle");
+const archiveJotsEnabledInput = $<HTMLInputElement>("archiveJotsEnabled");
+const archiveJotStatusEl = $<HTMLSpanElement>("archiveJotStatus");
 
 function uuidv4(): string {
   // Browser-safe UUID (Chromium supports crypto.randomUUID)
@@ -347,8 +352,10 @@ function waitForStopAck(timeoutMs = 120_000): Promise<boolean> {
 }
 
 function updateSpeakerMemoryStatus(profiles: SpeakerMemoryProfile[]): void {
+  const named = profiles.filter((profile) => profile.kind !== "auto");
+  const autoCount = profiles.length - named.length;
   savedVoiceListEl.replaceChildren(
-    ...profiles.map((profile) => {
+    ...named.map((profile) => {
       const chip = document.createElement("span");
       chip.className = "savedVoiceChip";
       chip.textContent = profile.name;
@@ -361,7 +368,10 @@ function updateSpeakerMemoryStatus(profiles: SpeakerMemoryProfile[]): void {
     memoryStatusEl.classList.remove("good", "bad");
     return;
   }
-  memoryStatusEl.textContent = `${profiles.length} saved voice${profiles.length === 1 ? "" : "s"}`;
+  const parts: string[] = [];
+  if (named.length > 0) parts.push(`${named.length} saved voice${named.length === 1 ? "" : "s"}`);
+  if (autoCount > 0) parts.push(`${autoCount} auto-learned`);
+  memoryStatusEl.textContent = parts.join(", ");
   memoryStatusEl.classList.add("good");
   memoryStatusEl.classList.remove("bad");
 }
@@ -926,6 +936,134 @@ async function cancelCurrentAiRequest(): Promise<void> {
   }
 }
 
+let archiveJotConfig: ArchiveJotConfig = {
+  enabledByDefault: false,
+  provider: "claude",
+  model: "haiku",
+  windowSec: 150,
+  tickSec: 60
+};
+let archiveJotSession: ArchiveJotSession | null = null;
+let archiveJotTimer: number | null = null;
+let archiveJotInFlight: Promise<void> | null = null;
+let archiveJotActiveRequestId: string | null = null;
+
+function setArchiveJotStatus(text: string, kind: "good" | "bad" | "neutral" = "neutral"): void {
+  archiveJotStatusEl.textContent = text;
+  archiveJotStatusEl.classList.toggle("good", kind === "good");
+  archiveJotStatusEl.classList.toggle("bad", kind === "bad");
+}
+
+function updateArchiveJotUi(): void {
+  if (!archiveJotsEnabledInput.checked) {
+    setArchiveJotStatus("off");
+  } else if (!archiveJotSession) {
+    setArchiveJotStatus("waiting for session");
+  } else {
+    setArchiveJotStatus(`${archiveJotSession.jottedCount} jotted`, archiveJotSession.jottedCount > 0 ? "good" : "neutral");
+  }
+}
+
+async function initializeArchiveJotConfig(): Promise<void> {
+  try {
+    if (!window.audioClient?.getArchiveJotConfig) return;
+    archiveJotConfig = await window.audioClient.getArchiveJotConfig();
+    archiveJotsEnabledInput.checked = archiveJotConfig.enabledByDefault;
+  } catch (error) {
+    console.error("Could not load archive jot config", error);
+  } finally {
+    updateArchiveJotUi();
+  }
+}
+
+function archiveJotWindowText(): string {
+  const segments = selectJotWindowSegments(
+    processedSegmentsById.values(),
+    Date.now() / 1000,
+    archiveJotConfig.windowSec
+  );
+  return formatCleanTranscript(segments);
+}
+
+async function runArchiveJotExtraction(): Promise<void> {
+  const session = archiveJotSession;
+  if (!session || !archiveJotsEnabledInput.checked || archiveJotInFlight) return;
+  if (!window.audioClient?.runArchiveExtraction) return;
+  const windowText = archiveJotWindowText();
+  if (!session.shouldExtract(windowText)) return;
+  session.beginExtraction(windowText);
+
+  const requestId = uuidv4();
+  archiveJotActiveRequestId = requestId;
+  setArchiveJotStatus("extracting…");
+  archiveJotInFlight = (async () => {
+    try {
+      const result = await window.audioClient.runArchiveExtraction({
+        requestId,
+        sessionId: session.sessionId,
+        batch: session.batch,
+        provider: archiveJotConfig.provider,
+        model: archiveJotConfig.model,
+        transcript: windowText,
+        jottedTexts: session.jottedTexts()
+      });
+      if (result.jotted.length > 0) session.recordJotted(result.jotted.map((item) => item.text));
+      if (!result.ok) {
+        session.recordFailure();
+        if (!result.cancelled) {
+          setArchiveJotStatus("jot error", "bad");
+          console.error("Archive jot extraction failed", result.error);
+          return;
+        }
+      }
+      updateArchiveJotUi();
+    } catch (error) {
+      session.recordFailure();
+      setArchiveJotStatus("jot error", "bad");
+      console.error("Archive jot extraction failed", error);
+    } finally {
+      if (archiveJotActiveRequestId === requestId) archiveJotActiveRequestId = null;
+      archiveJotInFlight = null;
+    }
+  })();
+  await archiveJotInFlight;
+}
+
+function stopArchiveJotTimer(): void {
+  if (archiveJotTimer !== null) {
+    window.clearInterval(archiveJotTimer);
+    archiveJotTimer = null;
+  }
+}
+
+function startArchiveJotLoop(): void {
+  stopArchiveJotTimer();
+  updateArchiveJotUi();
+  if (!archiveJotsEnabledInput.checked || !archiveJotSession) return;
+  archiveJotTimer = window.setInterval(() => void runArchiveJotExtraction(), archiveJotConfig.tickSec * 1000);
+}
+
+async function flushArchiveJots(): Promise<void> {
+  stopArchiveJotTimer();
+  const session = archiveJotSession;
+  if (!session) return;
+  // A mid-tick extraction covers a stale window; cancel it so the final flush wins.
+  if (archiveJotInFlight) {
+    const requestId = archiveJotActiveRequestId;
+    if (requestId) {
+      try {
+        await window.audioClient?.cancelArchiveExtraction?.(requestId);
+      } catch {
+        // The in-flight extraction reports its own failure.
+      }
+    }
+    await archiveJotInFlight;
+  }
+  if (archiveJotsEnabledInput.checked) await runArchiveJotExtraction();
+  archiveJotSession = null;
+  updateArchiveJotUi();
+}
+
 function isTranscriptNearBottom(): boolean {
   return transcriptEl.scrollHeight - transcriptEl.clientHeight - transcriptEl.scrollTop <= 72;
 }
@@ -1344,6 +1482,12 @@ async function start(): Promise<void> {
   startedAt = Date.now();
   endedAt = null;
 
+  archiveJotSession = new ArchiveJotSession(
+    batchNameForSession(new Date(), sessionTitleInput.value),
+    sessionId
+  );
+  startArchiveJotLoop();
+
   setConnStatus("Connecting…");
 
   ws = new WebSocket(url);
@@ -1373,6 +1517,10 @@ async function start(): Promise<void> {
       const layerSegments = segmentsForLayer(layer);
       for (const s of tu.segments ?? []) {
         layerSegments.set(s.id, s);
+      }
+      // Partials re-emit under the same id; only final processed segments arm extraction.
+      if (layer === "processed" && (tu.segments ?? []).some((s) => s.is_final)) {
+        archiveJotSession?.markDirty();
       }
       reconcileTranscriptMap(layerSegments);
       updateLayerCounts();
@@ -1416,6 +1564,7 @@ async function start(): Promise<void> {
 
 async function stop(): Promise<void> {
   endedAt = Date.now();
+  stopArchiveJotTimer();
   captureSwitchSeq.mic += 1;
   captureSwitchSeq.system += 1;
 
@@ -1436,6 +1585,10 @@ async function stop(): Promise<void> {
       finalized = false;
     }
   }
+
+  // The server flushed its assemblers before acking; capture the tail window.
+  await flushArchiveJots();
+
   micSender = null;
   sysSender = null;
   updateSentStats();
@@ -1474,6 +1627,21 @@ async function stop(): Promise<void> {
     raw_segments: rawSegments
   };
 
+  const jsonText = JSON.stringify(payload, null, 2);
+
+  // Auto-save first: the dialog below is cancellable and the server keeps nothing.
+  if (window.audioClient?.autoSaveTranscript) {
+    const autoSave = await window.audioClient.autoSaveTranscript({
+      fileName: `transcript-${session_id}-${endedAt}.json`,
+      jsonText
+    });
+    if (autoSave.saved && autoSave.path) {
+      appendTranscriptNotice(`Auto-saved ${autoSave.path}`);
+    } else if (autoSave.error) {
+      appendTranscriptNotice(`Auto-save failed: ${autoSave.error}`, "bad");
+    }
+  }
+
   const suggestedName = `transcript-${session_id}.json`;
   if (!window.audioClient?.saveTranscript) {
     appendTranscriptNotice(
@@ -1485,7 +1653,7 @@ async function stop(): Promise<void> {
 
   const res = await window.audioClient.saveTranscript({
     suggestedName,
-    jsonText: JSON.stringify(payload, null, 2)
+    jsonText
   });
 
   if (!res.saved && res.error) {
@@ -1534,6 +1702,19 @@ aiRefreshStatusBtn.addEventListener("click", () => void refreshAiCliStatus());
 aiSyncBtn.addEventListener("click", () => void runAiRequest(true));
 aiSendBtn.addEventListener("click", () => void runAiRequest(false));
 aiCancelBtn.addEventListener("click", () => void cancelCurrentAiRequest());
+archiveJotsEnabledInput.addEventListener("change", () => {
+  startArchiveJotLoop();
+  if (!archiveJotsEnabledInput.checked && archiveJotActiveRequestId) {
+    void window.audioClient?.cancelArchiveExtraction?.(archiveJotActiveRequestId);
+  }
+  if (archiveJotsEnabledInput.checked && window.audioClient?.getArchiveCliStatus) {
+    void window.audioClient.getArchiveCliStatus().then((status) => {
+      if (!status.available && archiveJotsEnabledInput.checked) {
+        setArchiveJotStatus("archive CLI not found", "bad");
+      }
+    });
+  }
+});
 aiQuestionEl.addEventListener("input", () => updateAiComposerState());
 aiQuestionEl.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
@@ -1561,4 +1742,5 @@ updateLayerCounts();
 updateSpeakerMemoryStatus(speakerMemoryProfiles);
 updateAiModelOptions();
 renderAiWorkspace();
+void initializeArchiveJotConfig();
 void refreshDevices();

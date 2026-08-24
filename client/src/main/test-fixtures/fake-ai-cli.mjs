@@ -15,6 +15,7 @@ if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
 
 const isCodex = args[0] === "exec";
 const transcriptIncluded = prompt.includes("BEGIN PROCESSED TRANSCRIPT");
+const responseOverride = process.env.CADENCE_FAKE_AI_RESPONSE;
 if (isCodex) {
   process.stdout.write(`${JSON.stringify({ type: "thread.started", thread_id: "fake-codex-thread" })}\n`);
   process.stdout.write(
@@ -22,7 +23,7 @@ if (isCodex) {
       type: "item.completed",
       item: {
         type: "agent_message",
-        text: `Fake Codex answer · transcript ${transcriptIncluded ? "included" : "unchanged"}`
+        text: responseOverride ?? `Fake Codex answer · transcript ${transcriptIncluded ? "included" : "unchanged"}`
       }
     })}\n`
   );
@@ -33,7 +34,7 @@ if (isCodex) {
   process.stdout.write(
     JSON.stringify({
       session_id: sessionId,
-      result: `Fake Claude answer · transcript ${transcriptIncluded ? "included" : "unchanged"}`,
+      result: responseOverride ?? `Fake Claude answer · transcript ${transcriptIncluded ? "included" : "unchanged"}`,
       is_error: false
     })
   );
